@@ -21,6 +21,11 @@ const PROVIDERS = {
     label: 'GPT (OpenAI)', keyPrefix: 'sk-', keyUrl: 'https://platform.openai.com/api-keys',
     defaultModel: 'gpt-5', fallbackModels: ['gpt-5', 'gpt-5-mini', 'gpt-4.1', 'gpt-4o'],
   },
+  codex: {
+    label: 'Codex (OpenAI)', keyOf: 'openai', keyPrefix: 'sk-', keyUrl: 'https://platform.openai.com/api-keys',
+    note: 'OpenAI 의 코딩 특화 모델입니다. GPT 칸에 넣은 OpenAI 키를 함께 씁니다.',
+    defaultModel: 'gpt-5-codex', fallbackModels: ['gpt-5-codex', 'codex-mini-latest'],
+  },
   google: {
     label: 'Gemini (Google)', keyPrefix: 'AIza', keyUrl: 'https://aistudio.google.com/apikey',
     defaultModel: 'gemini-2.5-flash', fallbackModels: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
@@ -143,6 +148,31 @@ const adapters = {
       return (r.data || []).map((m) => m.id)
         .filter((id) => /^(gpt-|o\d|chatgpt-)/.test(id) && !/(audio|realtime|transcribe|tts|image|search|embedding|instruct|codex)/.test(id))
         .sort().reverse();
+    },
+  },
+
+  // Codex 모델은 Chat Completions 가 아니라 Responses API 로만 부를 수 있다
+  codex: {
+    async chat(key, model, turns) {
+      const input = turns.map((t) => ({
+        role: t.role,
+        content: t.role === 'assistant'
+          ? [{ type: 'output_text', text: t.parts.map((p) => p.text).join('\n\n') }]
+          : t.parts.map((p) => (p.type === 'text' ? { type: 'input_text', text: p.text }
+            : p.type === 'image' ? { type: 'input_image', image_url: `data:${p.mime};base64,${p.data}` }
+              : { type: 'input_file', filename: p.name, file_data: `data:application/pdf;base64,${p.data}` })),
+      }));
+      const r = await http('https://api.openai.com/v1/responses', {
+        method: 'POST', headers: { authorization: `Bearer ${key}` },
+        body: { model, instructions: SYSTEM, input, max_output_tokens: 8192 },
+      });
+      if (typeof r.output_text === 'string') return r.output_text;
+      return (r.output || []).filter((o) => o.type === 'message')
+        .flatMap((o) => o.content || []).filter((c) => c.type === 'output_text').map((c) => c.text).join('');
+    },
+    async models(key) {
+      const r = await http('https://api.openai.com/v1/models', { headers: { authorization: `Bearer ${key}` } });
+      return (r.data || []).map((m) => m.id).filter((id) => id.includes('codex')).sort().reverse();
     },
   },
 

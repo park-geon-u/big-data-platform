@@ -179,7 +179,7 @@ test('사용자마다 자기 AI 키(Claude·GPT·Gemini)를 따로 쓴다', asyn
   // 처음엔 키 없음 → 데모
   let me = (await A.get('/api/me/ai')).body;
   assert.equal(me.active.hasKey, false);
-  assert.deepEqual(me.providers.map((p) => p.id), ['anthropic', 'openai', 'google']);
+  assert.deepEqual(me.providers.map((p) => p.id), ['anthropic', 'openai', 'codex', 'google']);
   // 잘못된 키·다른 회사 키·없는 제공자는 거절
   assert.equal((await A.raw('PUT', '/api/me/ai/keys/openai', { apiKey: 'sk-wrong' + 'x'.repeat(30) })).status, 400);
   const mismatch = await A.raw('PUT', '/api/me/ai/keys/google', { apiKey: GOOD.openai });
@@ -211,6 +211,15 @@ test('사용자마다 자기 AI 키(Claude·GPT·Gemini)를 따로 쓴다', asyn
   const cb = (await B.post('/api/conversations')).body;
   await B.post(`/api/conversations/${cb.id}/messages`, { content: '안녕' });
   assert.deepEqual([lastOpts.provider, lastOpts.apiKey], ['google', GOOD.google]);
+  // Codex 는 OpenAI 키를 함께 쓴다 (따로 키를 넣지 않음)
+  assert.equal((await A.raw('PUT', '/api/me/ai/keys/codex', { apiKey: GOOD.openai })).status, 400);
+  const cx = await A.raw('PUT', '/api/me/ai/active', { provider: 'codex', model: 'gpt-5-codex' });
+  assert.equal(cx.body.providers.find((p) => p.id === 'codex').hasKey, true);
+  await A.post(`/api/conversations/${ca.id}/messages`, { content: '코드 봐 줘' });
+  assert.deepEqual([lastOpts.provider, lastOpts.model, lastOpts.apiKey], ['codex', 'gpt-5-codex', GOOD.openai]);
+  // GPT 쪽 모델 선택은 그대로 유지
+  assert.equal(cx.body.providers.find((p) => p.id === 'openai').model, 'gpt-5-mini');
+  assert.equal((await B.get('/api/me/ai')).body.providers.find((p) => p.id === 'codex').hasKey, false);
   // 키 삭제 → 다음 질문은 키 없이 (데모)
   await A.del('/api/me/ai/keys/openai');
   await A.post(`/api/conversations/${ca.id}/messages`, { content: '또' });

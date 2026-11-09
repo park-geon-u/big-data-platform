@@ -46,7 +46,14 @@ function makeUserAI(db, { dataDir }) {
     pref: db.prepare('SELECT provider FROM user_ai_prefs WHERE user_id = ?'),
     putPref: db.prepare(`INSERT INTO user_ai_prefs (user_id, provider) VALUES (?,?)
       ON CONFLICT(user_id) DO UPDATE SET provider = excluded.provider`),
+    modelPref: db.prepare('SELECT model FROM user_model_prefs WHERE user_id = ? AND provider = ?'),
+    putModelPref: db.prepare(`INSERT INTO user_model_prefs (user_id, provider, model) VALUES (?,?,?)
+      ON CONFLICT(user_id, provider) DO UPDATE SET model = excluded.model`),
   };
+  // Codex 처럼 다른 회사 키를 함께 쓰는 AI 는 그 키를 찾아 쓴다 (codex → openai)
+  const keyOf = (provider) => PROVIDERS[provider].keyOf || provider;
+  const modelFor = (userId, provider) => q.modelPref.get(userId, provider)?.model
+    || (!PROVIDERS[provider].keyOf && q.key.get(userId, provider)?.model) || PROVIDERS[provider].defaultModel;
 
   return {
     /** 화면용 요약 (키 원문은 절대 포함하지 않음) */
@@ -56,9 +63,9 @@ function makeUserAI(db, { dataDir }) {
       return {
         active: { provider: active.provider, model: active.model, hasKey: !!active.apiKey },
         providers: Object.entries(PROVIDERS).map(([id, p]) => ({
-          id, label: p.label, keyUrl: p.keyUrl, keyPrefix: p.keyPrefix,
-          hasKey: !!rows[id], keyHint: rows[id]?.key_hint || null,
-          model: rows[id]?.model || p.defaultModel, suggestedModels: p.fallbackModels,
+          id, label: p.label, keyUrl: p.keyUrl, keyPrefix: p.keyPrefix, keyOf: p.keyOf || null, note: p.note || null,
+          hasKey: !!rows[keyOf(id)], keyHint: rows[keyOf(id)]?.key_hint || null,
+          model: modelFor(userId, id), suggestedModels: p.fallbackModels,
         })),
       };
     },
@@ -69,15 +76,15 @@ function makeUserAI(db, { dataDir }) {
         // 고른 적이 없으면 키가 있는 첫 제공자, 그것도 없으면 Claude
         provider = q.keys.all(userId)[0]?.provider || 'anthropic';
       }
-      const row = q.key.get(userId, provider);
+      const row = q.key.get(userId, keyOf(provider));
       return {
         provider,
-        model: row?.model || PROVIDERS[provider].defaultModel,
+        model: modelFor(userId, provider),
         apiKey: row ? decrypt(row.enc_key) : null,
       };
     },
     apiKey(userId, provider) {
-      const row = q.key.get(userId, provider);
+      const row = q.key.get(userId, keyOf(provider));
       return row ? decrypt(row.enc_key) : null;
     },
     saveKey(userId, provider, key, model) {
@@ -86,7 +93,7 @@ function makeUserAI(db, { dataDir }) {
     deleteKey(userId, provider) { q.delKey.run(userId, provider); },
     setActive(userId, provider, model) {
       q.putPref.run(userId, provider);
-      if (model) q.setModel.run(model, userId, provider);
+      if (model) q.putModelPref.run(userId, provider, model);
     },
   };
 }

@@ -106,6 +106,13 @@ function openDb(file) {
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (user_id, provider)
   );
+  -- 사용자가 AI 마다 고른 모델
+  CREATE TABLE IF NOT EXISTS user_model_prefs (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    PRIMARY KEY (user_id, provider)
+  );
   -- 사용자가 지금 쓰는 AI 제공자
   CREATE TABLE IF NOT EXISTS user_ai_prefs (
     user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,

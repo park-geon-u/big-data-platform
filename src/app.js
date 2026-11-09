@@ -122,6 +122,7 @@ function createApp({ dbFile, uploadDir, dataDir, generateReply = ai.generateRepl
   // 키 저장: 실제로 제공자 서버에 모델 목록을 요청해 보고, 성공해야 저장
   app.put('/api/me/ai/keys/:provider', wrap(async (req, res) => {
     const p = provider(req.params.provider);
+    if (ai.PROVIDERS[p].keyOf) throw new HttpError(400, `${ai.PROVIDERS[p].label} 는 ${ai.PROVIDERS[ai.PROVIDERS[p].keyOf].label} 키를 함께 씁니다. 그쪽에 키를 넣어 주세요.`);
     const key = String(req.body.apiKey || '').trim();
     if (!key) throw new HttpError(400, 'API 키를 입력해 주세요.');
     if (key.length > 300 || /\s/.test(key)) throw new HttpError(400, 'API 키 형식이 올바르지 않습니다.');

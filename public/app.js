@@ -449,14 +449,15 @@ async function renderSettings() {
         ${ai.active.provider === p.id ? '<span class="badge">지금 사용 중</span>' : `<button class="small" data-use>이 AI 쓰기</button>`}</h2>
       <p style="margin-top:0">${p.hasKey
     ? `<span class="badge" style="background:#dcfce7;color:#166534">연결됨</span> 키 ${esc(p.keyHint)}`
-    : '<span class="badge" style="background:#fef3c7;color:#92400e">키 없음</span>'}</p>
-      <form data-keyform style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
+    : `<span class="badge" style="background:#fef3c7;color:#92400e">키 없음</span>`}</p>
+      ${p.note ? `<p class="muted" style="font-size:13px;margin-top:-4px">${esc(p.note)}</p>` : ''}
+      ${p.keyOf ? '' : `<form data-keyform style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">
         <input name="apiKey" type="password" placeholder="${esc(p.keyPrefix)}..." autocomplete="off" spellcheck="false" style="flex:1;min-width:200px">
         <button class="primary" data-save>${p.hasKey ? '키 바꾸기' : '확인 후 저장'}</button>
         ${p.hasKey ? '<button type="button" class="danger" data-del>삭제</button>' : ''}
-      </form>
+      </form>`}
       <p class="error" data-err></p>
-      <p class="muted" style="font-size:12px;margin:0 0 10px">키 발급: <a href="${esc(p.keyUrl)}" target="_blank" rel="noopener">${esc(p.keyUrl.replace('https://', ''))}</a></p>
+      ${p.keyOf ? '' : `<p class="muted" style="font-size:12px;margin:0 0 10px">키 발급: <a href="${esc(p.keyUrl)}" target="_blank" rel="noopener">${esc(p.keyUrl.replace('https://', ''))}</a></p>`}
       ${p.hasKey ? `<label style="margin:0">모델<select data-model><option>${esc(p.model)}</option></select></label>` : ''}
     </div>`).join('')}
   </div>`;
@@ -465,7 +466,7 @@ async function renderSettings() {
     const id = card.dataset.prov;
     const p = ai.providers.find((x) => x.id === id);
     const err = $('[data-err]', card);
-    $('[data-keyform]', card).addEventListener('submit', async (e) => {
+    $('[data-keyform]', card)?.addEventListener('submit', async (e) => {
       e.preventDefault();
       const apiKey = e.target.apiKey.value.trim();
       if (!apiKey) { err.textContent = '키를 입력해 주세요.'; return; }

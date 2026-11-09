@@ -49,6 +49,21 @@ test('GPT 요청 형식', async () => {
   assert.ok(last.some((b) => b.type === 'file' && b.file.file_data.startsWith('data:application/pdf;base64,')));
 });
 
+test('Codex 요청 형식 (Responses API)', async () => {
+  const calls = capture({ output: [{ type: 'reasoning' }, { type: 'message', content: [{ type: 'output_text', text: '코덱스 답' }] }] });
+  const r = await ai.generateReply(history, files, { provider: 'codex', model: 'gpt-5-codex', apiKey: 'k4' });
+  assert.equal(r, '코덱스 답');
+  const { url, headers, body } = calls[0];
+  assert.equal(url, 'https://api.openai.com/v1/responses');
+  assert.equal(headers.authorization, 'Bearer k4');
+  assert.ok(body.instructions.includes('AI 비서'));
+  assert.equal(body.input[1].content[0].type, 'output_text');
+  const last = body.input.at(-1).content;
+  assert.ok(last.some((b) => b.type === 'input_image' && b.image_url.startsWith('data:image/png;base64,')));
+  assert.ok(last.some((b) => b.type === 'input_file' && b.file_data.startsWith('data:application/pdf;base64,')));
+  assert.equal(last.at(-1).text, '요약해 줘');
+});
+
 test('Gemini 요청 형식', async () => {
   const calls = capture({ candidates: [{ content: { parts: [{ text: '제미나이 ' }, { text: '답' }] } }] });
   const r = await ai.generateReply(history, files, { provider: 'google', model: 'gemini-2.5-flash', apiKey: 'k3' });

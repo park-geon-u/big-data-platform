@@ -18,6 +18,7 @@ npm test                 # 권한·파일 읽기 테스트
 |---|---|---|
 | Claude (Anthropic) | console.anthropic.com/settings/keys | `sk-ant-...` |
 | GPT (OpenAI) | platform.openai.com/api-keys | `sk-...` |
+| Codex (OpenAI) | GPT 칸의 OpenAI 키를 함께 사용 | (따로 입력 안 함) |
 | Gemini (Google) | aistudio.google.com/apikey | `AIza...` |
 
 - 키를 저장하기 전에 그 회사 서버에서 모델 목록을 받아 와 키가 맞는지 확인하고, 받아 온 목록에서 모델을 고를 수 있습니다.
@@ -26,6 +27,13 @@ npm test                 # 권한·파일 읽기 테스트
 - 공유 스레드에서도 **질문한 사람 본인의 키**로 답합니다.
 - 키가 없으면 데모 응답으로 동작합니다.
 - 파일은 세 AI 모두에 전달됩니다 (텍스트는 추출본, 이미지와 스캔 PDF 는 원본).
+
+## 주소 바꾸기 · 다른 사람이 접속하기
+
+- **포트 바꾸기**: `PORT=8080 npm start` (Windows PowerShell 은 `$env:PORT=8080; npm start`) → `http://localhost:8080`
+- **같은 와이파이의 다른 기기에서**: 서버를 켠 컴퓨터의 내부 IP 로 접속 (예: `http://192.168.0.12:3000`). Windows 는 `ipconfig` 의 IPv4 주소. 방화벽 허용이 필요할 수 있음
+- **인터넷 어디서나 (내 컴퓨터 설치 없이)**: Railway·Render 같은 호스팅에 이 저장소를 연결해 배포하면 `https://이름.up.railway.app` 같은 주소가 생김. DB·업로드 파일이 `data/` 폴더에 저장되므로 **영구 저장 볼륨**을 `DATA_DIR` 로 연결해야 재배포 때 데이터가 지워지지 않음. 배포 시 `NODE_ENV=production` 을 설정 (HTTPS 전용 쿠키)
+- **내 도메인**: 호스팅 설정에서 구입한 도메인을 연결
 
 ## 구현 범위
 
