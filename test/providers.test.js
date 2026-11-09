@@ -90,3 +90,14 @@ test('오류는 알아듣기 쉬운 말로, 모델 목록은 걸러서', async (
   // 키가 없으면 데모 응답
   assert.match(await ai.generateReply(history, [], { provider: 'google' }), /데모 응답/);
 });
+
+test('문서 생성: 문서용 지시문으로 호출하고 코드 블록을 벗긴다', async () => {
+  const calls = capture({ content: [{ type: 'text', text: '```markdown\n# 회의록\n- 결정 사항\n```' }] });
+  const md = await ai.generateDocument(history, files, '회의록으로', { provider: 'anthropic', model: 'm', apiKey: 'k' });
+  assert.equal(md, '# 회의록\n- 결정 사항');
+  assert.match(calls[0].body.system, /문서를 작성하는/);
+  const last = calls[0].body.messages.at(-1).content.at(-1).text;
+  assert.ok(last.includes('<conversation>') && last.includes('첫 질문') && last.includes('회의록으로'));
+  // 키가 없으면 데모 문서
+  assert.match(await ai.generateDocument(history, [], '보고서', {}), /^# 보고서/);
+});

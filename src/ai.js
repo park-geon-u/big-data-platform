@@ -109,7 +109,7 @@ function buildTurns(history, files, multiUser) {
 // ---------------- 제공자별 구현 ----------------
 const adapters = {
   anthropic: {
-    async chat(key, model, turns) {
+    async chat(key, model, turns, system = SYSTEM) {
       const messages = turns.map((t) => ({
         role: t.role,
         content: t.parts.map((p) => (p.type === 'text' ? { type: 'text', text: p.text }
@@ -118,7 +118,7 @@ const adapters = {
       }));
       const r = await http('https://api.anthropic.com/v1/messages', {
         method: 'POST', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-        body: { model, max_tokens: 4096, system: SYSTEM, messages },
+        body: { model, max_tokens: 8192, system, messages },
       });
       return (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
     },
@@ -129,8 +129,8 @@ const adapters = {
   },
 
   openai: {
-    async chat(key, model, turns) {
-      const messages = [{ role: 'system', content: SYSTEM }, ...turns.map((t) => ({
+    async chat(key, model, turns, system = SYSTEM) {
+      const messages = [{ role: 'system', content: system }, ...turns.map((t) => ({
         role: t.role,
         content: t.role === 'assistant' ? t.parts.map((p) => p.text).join('\n\n') : t.parts.map((p) => (
           p.type === 'text' ? { type: 'text', text: p.text }
@@ -153,7 +153,7 @@ const adapters = {
 
   // Codex 모델은 Chat Completions 가 아니라 Responses API 로만 부를 수 있다
   codex: {
-    async chat(key, model, turns) {
+    async chat(key, model, turns, system = SYSTEM) {
       const input = turns.map((t) => ({
         role: t.role,
         content: t.role === 'assistant'
@@ -164,7 +164,7 @@ const adapters = {
       }));
       const r = await http('https://api.openai.com/v1/responses', {
         method: 'POST', headers: { authorization: `Bearer ${key}` },
-        body: { model, instructions: SYSTEM, input, max_output_tokens: 8192 },
+        body: { model, instructions: system, input, max_output_tokens: 8192 },
       });
       if (typeof r.output_text === 'string') return r.output_text;
       return (r.output || []).filter((o) => o.type === 'message')
@@ -177,7 +177,7 @@ const adapters = {
   },
 
   google: {
-    async chat(key, model, turns) {
+    async chat(key, model, turns, system = SYSTEM) {
       const contents = turns.map((t) => ({
         role: t.role === 'assistant' ? 'model' : 'user',
         parts: t.parts.map((p) => (p.type === 'text' ? { text: p.text }
@@ -185,7 +185,7 @@ const adapters = {
       }));
       const r = await http(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
         method: 'POST', headers: { 'x-goog-api-key': key },
-        body: { systemInstruction: { parts: [{ text: SYSTEM }] }, contents, generationConfig: { maxOutputTokens: 8192 } },
+        body: { systemInstruction: { parts: [{ text: system }] }, contents, generationConfig: { maxOutputTokens: 8192 } },
       });
       const c = r.candidates?.[0];
       const text = (c?.content?.parts || []).map((p) => p.text || '').join('');
@@ -220,14 +220,51 @@ async function listModels(provider, key) {
  */
 async function generateReply(history, files, opts = {}) {
   const { provider = 'anthropic', model, apiKey, multiUser } = opts;
-  if (!apiKey) return mockReply(history, files, provider);
+  if (!apiKey) return opts.mock ? opts.mock(history, files, provider) : mockReply(history, files, provider);
   const turns = buildTurns(history, files, multiUser);
   try {
-    const text = await adapters[provider].chat(apiKey, model || PROVIDERS[provider].defaultModel, turns);
+    const text = await adapters[provider].chat(apiKey, model || PROVIDERS[provider].defaultModel, turns, opts.system || SYSTEM);
     return text.trim() || '(빈 응답)';
   } catch (e) {
     throw new AIError(friendlyError(provider, e), e.status);
   }
+}
+
+// ---------------- 3차: AI 문서 생성 ----------------
+const DOC_SYSTEM = `당신은 업무 문서를 작성하는 AI 비서입니다.
+지금까지의 대화와 첨부 파일만 근거로, 사용자가 요청한 문서를 한국어 Markdown 으로 작성하세요.
+- 첫 줄은 "# 문서 제목" 으로 시작합니다.
+- 제목(##), 목록(-, 1.), 굵게(**), 표(| |)를 적절히 씁니다.
+- 대화나 파일에 없는 사실은 지어내지 말고, 필요하면 "확인 필요" 라고 적습니다.
+- 문서 본문만 출력하고, 앞뒤 인사말이나 설명은 쓰지 않습니다.`;
+
+/**
+ * 대화 기록 + 파일로 문서를 만든다. 결과는 Markdown 문자열.
+ * @param instruction 사용자가 원하는 문서 (예: "회의록으로 정리")
+ */
+async function generateDocument(history, files, instruction, opts = {}) {
+  const transcript = history.map((m) => `${m.role === 'assistant' ? 'AI' : (m.author_name || '사용자')}: ${m.content}`).join('\n\n');
+  const ask = `다음은 지금까지의 대화입니다.\n<conversation>\n${transcript || '(대화 없음)'}\n</conversation>\n\n요청한 문서: ${instruction}`;
+  const md = await generateReply([{ role: 'user', content: ask }], files, {
+    ...opts, multiUser: false, system: DOC_SYSTEM,
+    mock: () => mockDocument(history, files, instruction),
+  });
+  // 모델이 코드 블록으로 감싸 보내는 경우 벗겨낸다
+  return md.replace(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*$/i, '$1').trim();
+}
+
+function mockDocument(history, files, instruction) {
+  return [
+    `# ${instruction.slice(0, 50)}`,
+    '',
+    '> ⚠️ AI 키가 없어 데모 문서입니다. ⚙ 내 AI 설정에서 키를 넣으면 AI 가 실제 내용을 작성합니다.',
+    '',
+    '## 대화 요약',
+    ...history.slice(-10).map((m) => `- **${m.role === 'assistant' ? 'AI' : (m.author_name || '사용자')}**: ${m.content.replace(/\s+/g, ' ').slice(0, 100)}`),
+    '',
+    '## 참고한 파일',
+    ...(files.length ? files.map((f) => `- ${f.name}`) : ['- (없음)']),
+  ].join('\n');
 }
 
 function mockReply(history, files, provider) {
@@ -249,4 +286,4 @@ function mockReply(history, files, provider) {
   return lines.join('\n');
 }
 
-module.exports = { PROVIDERS, generateReply, listModels, setFetch, AIError, buildTurns, adapters };
+module.exports = { PROVIDERS, generateReply, generateDocument, listModels, setFetch, AIError, buildTurns, adapters };

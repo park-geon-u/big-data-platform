@@ -11,6 +11,11 @@ const seen = []; // AI 에 전달된 파일 기록
 let lastOpts = null;
 const fakeAI = async (history, files, opts) => { lastOpts = opts; seen.push(files.map((f) => f.name)); return `답변(${files.length}개 파일)`; };
 const GOOD = { anthropic: 'sk-ant-api03-' + 'a'.repeat(40) + 'WXYZ', openai: 'sk-proj-' + 'o'.repeat(40) + 'OPEN', google: 'AIza' + 'g'.repeat(35) };
+let docCall = null;
+const fakeDoc = async (history, files, instruction, opts) => {
+  docCall = { history, files: files.map((f) => f.name), instruction, opts };
+  return `# 주간 회의록\n\n## 요약\n- **매출** 증가\n\n| 항목 | 값 |\n|---|---|\n| 매출 | 150 |`;
+};
 const fakeList = async (provider, key) => {
   if (key !== GOOD[provider]) throw new Error(`${provider} API 키가 올바르지 않습니다.`);
   return { anthropic: ['claude-sonnet-5-5'], openai: ['gpt-5', 'gpt-5-mini'], google: ['gemini-2.5-flash'] }[provider];
@@ -18,7 +23,7 @@ const fakeList = async (provider, key) => {
 
 before(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'aiapp-'));
-  const r = createApp({ dbFile: path.join(tmp, 't.db'), uploadDir: path.join(tmp, 'up'), generateReply: fakeAI, listModels: fakeList });
+  const r = createApp({ dbFile: path.join(tmp, 't.db'), uploadDir: path.join(tmp, 'up'), generateReply: fakeAI, listModels: fakeList, generateDocument: fakeDoc });
   db = r.db;
   server = r.app.listen(0);
   await new Promise((ok) => server.once('listening', ok));
@@ -306,6 +311,62 @@ test('2차: 초대 → 수락, 파일 개별 공유, 스레드 공유, 내보내
   assert.equal((await A.del(`/api/projects/${Q.id}/members/${aId}`)).status, 400);
   assert.equal((await D.del(`/api/projects/${Q.id}/members/${dId}`)).status, 200);
   assert.equal((await D.get(`/api/projects/${Q.id}`)).status, 404);
+});
+
+test('3차: AI 가 공유 대화와 허용된 파일로 문서를 만들어 프로젝트에 저장', async () => {
+  const E = client(); const G = client(); const H = client();
+  await E.post('/api/auth/signup', { email: 'e@x.com', name: '이', password: 'password5' });
+  await G.post('/api/auth/signup', { email: 'g@x.com', name: '지', password: 'password6' });
+  await H.post('/api/auth/signup', { email: 'h@x.com', name: '해', password: 'password7' });
+  const uid = (e) => db.prepare('SELECT id FROM users WHERE email = ?').get(e).id;
+  const P3 = (await E.post('/api/projects', { name: '문서 프로젝트' })).body;
+  for (const [C, mail] of [[G, 'g@x.com'], [H, 'h@x.com']]) {
+    await E.post(`/api/projects/${P3.id}/invites`, { email: mail });
+    await C.post(`/api/invites/${(await C.get('/api/invites')).body.invites[0].id}/accept`);
+  }
+  const pub = (await E.upload('sales.xlsx', { projectId: P3.id, visibility: 'project' })).body.file;
+  const priv = (await E.upload('report.docx', { projectId: P3.id })).body.file;
+  const t = (await E.post(`/api/projects/${P3.id}/threads`)).body;
+  await E.post(`/api/conversations/${t.id}/files`, { fileId: pub.id });
+  await E.post(`/api/conversations/${t.id}/files`, { fileId: priv.id });
+  await E.raw('PUT', `/api/conversations/${t.id}/members`, { userId: uid('g@x.com'), permission: 'participate' });
+  await G.post(`/api/conversations/${t.id}/messages`, { content: '매출이 늘었어요' });
+
+  // 읽기 권한·비참여자는 문서를 만들 수 없다
+  assert.equal((await H.post(`/api/conversations/${t.id}/documents`, { instruction: '회의록' })).status, 404);
+  assert.equal((await G.post(`/api/conversations/${t.id}/documents`, {})).status, 400);
+
+  const r = await G.post(`/api/conversations/${t.id}/documents`, { instruction: '회의록으로 정리', format: 'docx' });
+  assert.equal(r.status, 200);
+  // AI 에는 공유 대화 + 모든 참여자가 볼 수 있는 파일만 (E 의 비공개 report.docx 제외)
+  assert.deepEqual(docCall.files, ['sales.xlsx']);
+  assert.ok(docCall.history.some((m) => m.content === '매출이 늘었어요'));
+  assert.equal(docCall.instruction, '회의록으로 정리');
+  const doc = r.body.file;
+  assert.equal(doc.name, '주간 회의록.docx');
+  assert.equal(doc.aiGenerated, true);
+  assert.equal(doc.projectId, P3.id);
+  // 저장된 문서는 스레드 참여자(E, G)만 볼 수 있고 H 는 못 본다
+  assert.equal((await E.get(`/api/files/${doc.id}`)).status, 200);
+  assert.equal((await G.get(`/api/files/${doc.id}`)).status, 200);
+  assert.equal((await H.get(`/api/files/${doc.id}`)).status, 404);
+  assert.ok((await G.get(`/api/files/${doc.id}`)).body.preview.includes('| 매출 | 150 |'));
+  // 진짜 Word 파일인지: 내려받아 다시 읽기
+  const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'g@x.com', password: 'password6' }) });
+  const res = await fetch(`${base}/api/files/${doc.id}/download`, { headers: { cookie: login.headers.get('set-cookie').split(';')[0] } });
+  const { extractFile } = require('../src/fileReader');
+  const back = await extractFile(Buffer.from(await res.arrayBuffer()), 'x.docx');
+  assert.equal(back.kind, 'text');
+  assert.ok(back.text.includes('주간 회의록') && back.text.includes('매출'));
+  // 스레드에 안내 메시지와 함께 붙어 있다
+  assert.ok(r.body.conversation.files.some((f) => f.id === doc.id && f.usable));
+  assert.match(r.body.conversation.messages.at(-1).content, /주간 회의록\.docx/);
+  // 개인 대화에서 만들면 내 개인 파일
+  const pc = (await H.post('/api/conversations')).body;
+  const md = await H.post(`/api/conversations/${pc.id}/documents`, { instruction: '메모', format: 'md' });
+  assert.equal(md.body.file.projectId, null);
+  assert.equal(md.body.file.name, '주간 회의록.md');
+  assert.equal((await E.get(`/api/files/${md.body.file.id}`)).status, 404);
 });
 
 test('잘못된 ID·로그아웃 처리', async () => {

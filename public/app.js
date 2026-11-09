@@ -166,6 +166,7 @@ async function renderChat(convId) {
       <input type="file" id="file-in" hidden>
       <button type="button" class="attach" id="attach" title="파일 올리기">📎</button>
       ${isThread ? '<button type="button" class="attach small" id="pick" title="프로젝트 파일 붙이기">📁</button>' : ''}
+      <button type="button" class="attach small" id="mkdoc" title="AI 로 문서 만들기">📝</button>
       <textarea id="input" rows="1" placeholder="메시지를 입력하세요 (Shift+Enter 줄바꿈)"></textarea>
       <button class="primary" id="send">보내기</button>
     </form>` : '<p class="muted" style="padding:12px 20px">읽기 권한만 있어 메시지를 쓸 수 없습니다.</p>'}`;
@@ -182,7 +183,8 @@ async function renderChat(convId) {
     box.scrollTop = box.scrollHeight;
     $('#atts').innerHTML = conv.files.map((f) => `<span class="chip ${f.kind === 'unsupported' || !f.usable ? 'warn' : ''}"
       title="${esc(!f.usable ? '스레드 참여자 중 이 파일을 볼 수 없는 사람이 있어 AI 가 사용하지 않습니다.' : (f.note || KIND[f.kind]))}">
-      <span>${f.usable ? '📄' : '🚫'} ${esc(f.name)}</span>${canWrite ? `<button data-detach="${f.id}" title="대화에서 빼기">✕</button>` : ''}</span>`).join('');
+      <span style="cursor:pointer" data-chipview="${f.id}">${f.usable ? (f.aiGenerated ? '🤖' : '📄') : '🚫'} ${esc(f.name)}</span>${canWrite ? `<button data-detach="${f.id}" title="대화에서 빼기">✕</button>` : ''}</span>`).join('');
+    $('#atts').querySelectorAll('[data-chipview]').forEach((x) => x.addEventListener('click', () => previewFile(+x.dataset.chipview)));
     $('#atts').querySelectorAll('[data-detach]').forEach((b) => b.addEventListener('click', async () => {
       paint(await api(`/api/conversations/${convId}/files/${b.dataset.detach}`, { method: 'DELETE' }));
     }));
@@ -221,6 +223,26 @@ async function renderChat(convId) {
     } catch (err) { toast(err.message); $('#typing')?.remove(); input.value = text; }
     $('#send').disabled = false; input.focus();
   });
+
+  $('#mkdoc').addEventListener('click', () => openModal(`<h2>📝 AI 로 문서 만들기</h2>
+    <p class="muted" style="font-size:13px">지금까지의 대화와 붙인 파일${isThread ? '(이 스레드 참여자 모두가 볼 수 있는 것만)' : ''}을 바탕으로 AI 가 문서를 써서
+      ${isThread ? '프로젝트 파일 저장소에 저장하고, 이 스레드 참여자에게 공유합니다.' : '내 파일로 저장합니다.'}</p>
+    <form id="doc-form">
+      <label>어떤 문서를 만들까요?<textarea name="instruction" rows="3" required maxlength="2000" placeholder="예: 오늘 논의한 내용을 회의록으로 정리해 줘 / 첨부한 매출 자료로 주간 보고서를 써 줘"></textarea></label>
+      <label>파일 형식<select name="format"><option value="docx">Word (.docx)</option><option value="md">Markdown (.md)</option></select></label>
+      <p class="error" id="doc-err"></p>
+      <div class="modal-actions"><button type="button" data-close>취소</button><button class="primary" id="doc-go">문서 만들기</button></div>
+    </form>`, (card) => {
+    $('#doc-form', card).addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const body = Object.fromEntries(new FormData(e.target));
+      $('#doc-go').disabled = true; $('#doc-go').textContent = 'AI 가 작성하는 중…'; $('#doc-err').textContent = '';
+      try {
+        const r = await api(`/api/conversations/${convId}/documents`, { method: 'POST', body });
+        closeModal(); paint(r.conversation); toast(`"${r.file.name}" 을(를) 저장했습니다.`); previewFile(r.file.id);
+      } catch (err) { $('#doc-err').textContent = err.message; $('#doc-go').disabled = false; $('#doc-go').textContent = '문서 만들기'; }
+    });
+  }));
 
   $('#attach').addEventListener('click', () => $('#file-in').click());
   $('#file-in').addEventListener('change', async (e) => {
@@ -272,7 +294,7 @@ async function renderProject(pid) {
           <span style="font-size:12px">${esc(state.info.supportedFiles)}</span></div>
         <input type="file" id="pf" hidden multiple>
         <ul class="rows">${p.files.map((f) => `<li>
-          <span class="grow" title="${esc(f.note || '')}"><a href="#" data-view="${f.id}">📄 ${esc(f.name)}</a>
+          <span class="grow" title="${esc(f.note || '')}"><a href="#" data-view="${f.id}">${f.aiGenerated ? '🤖' : '📄'} ${esc(f.name)}</a>${f.aiGenerated ? ' <span class="badge">AI 생성</span>' : ''}
             <span class="muted" style="font-size:12px"> · ${fmtSize(f.size)} · ${KIND[f.kind]}${f.ownerId !== state.me.id ? ` · ${esc(f.ownerName)}` : ''}</span></span>
           ${f.ownerId === state.me.id ? `<select data-vis="${f.id}" style="width:auto;padding:4px 6px;font-size:12px">
               <option value="private" ${f.visibility === 'private' && !f.sharedWith.length ? 'selected' : ''}>나만 보기</option>

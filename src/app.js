@@ -9,11 +9,14 @@ const { makeAuthz, HttpError, notFound } = require('./authz');
 const { extractFile, SUPPORTED_LABEL, IMAGE_MIME } = require('./fileReader');
 const ai = require('./ai');
 const { makeUserAI } = require('./settings');
+const { markdownToDocx } = require('./docBuilder');
 
 const SESSION_DAYS = 14;
 const MAX_UPLOAD = 50 * 1024 * 1024;
 
-function createApp({ dbFile, uploadDir, dataDir, generateReply = ai.generateReply, listModels = ai.listModels } = {}) {
+function createApp({
+  dbFile, uploadDir, dataDir, generateReply = ai.generateReply, listModels = ai.listModels, generateDocument = ai.generateDocument,
+} = {}) {
   const db = openDb(dbFile);
   const authz = makeAuthz(db);
   const userAI = makeUserAI(db, { dataDir });
@@ -165,6 +168,7 @@ function createApp({ dbFile, uploadDir, dataDir, generateReply = ai.generateRepl
     id: f.id, name: f.name, mime: f.mime, size: f.size, kind: f.kind, note: f.extract_note,
     visibility: f.visibility, projectId: f.project_id, ownerId: f.owner_id, createdAt: f.created_at,
     chars: f.extracted_text ? f.extracted_text.length : 0,
+    aiGenerated: f.source_conversation_id != null, sourceConversationId: f.source_conversation_id ?? null,
   });
 
   function convDetail(userId, convId) {
@@ -268,6 +272,53 @@ function createApp({ dbFile, uploadDir, dataDir, generateReply = ai.generateRepl
     db.prepare('INSERT INTO messages (conversation_id, author_id, role, content, ai_model) VALUES (?,?,?,?,?)')
       .run(conv.id, null, 'assistant', reply, aiLabel);
     res.json(convDetail(req.user.id, conv.id));
+  }));
+
+  // ---------- 3차: AI 문서 생성 ----------
+  // 대화 내용과 (그 대화의 모든 참여자가 볼 수 있는) 첨부 파일만으로 AI 가 문서를 만들어 저장한다.
+  // 프로젝트 스레드면 프로젝트 파일 저장소에 저장하고, 그 스레드 참여자 전원에게만 공유한다.
+  app.post('/api/conversations/:id/documents', wrap(async (req, res) => {
+    const { conv } = authz.conversationWrite(req.user.id, id(req.params.id));
+    const instruction = str(req.body.instruction, '어떤 문서를 만들지', 2000);
+    const format = req.body.format === 'docx' ? 'docx' : 'md';
+    const history = db.prepare(`SELECT m.role, m.content, u.name AS author_name FROM messages m
+      LEFT JOIN users u ON u.id = m.author_id WHERE m.conversation_id = ? ORDER BY m.id DESC LIMIT 100`).all(conv.id).reverse();
+    const files = db.prepare(`SELECT f.* FROM conversation_files cf JOIN files f ON f.id = cf.file_id WHERE cf.conversation_id = ?`)
+      .all(conv.id).filter((f) => authz.canReadFile(req.user.id, f) && authz.fileUsableInConversation(conv, f));
+
+    const me = userAI.active(req.user.id);
+    let md;
+    try {
+      md = await generateDocument(history, files, instruction, { provider: me.provider, model: me.model, apiKey: me.apiKey });
+    } catch (e) {
+      throw new HttpError(502, `문서를 만들지 못했습니다: ${e.message}`);
+    }
+    const title = (str(req.body.title, '문서 이름', 100, { required: false })
+      || md.match(/^#\s+(.+)$/m)?.[1] || instruction).replace(/[\\/:*?"<>|]/g, ' ').trim().slice(0, 80) || 'AI 문서';
+    const name = `${title}.${format}`;
+    const buf = format === 'docx' ? await markdownToDocx(md, title) : Buffer.from(md, 'utf8');
+    const mime = format === 'docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : 'text/markdown';
+    const storagePath = path.join(uploadDir, crypto.randomBytes(16).toString('hex'));
+    fs.writeFileSync(storagePath, buf);
+
+    const viewers = conv.project_id == null ? [] : [conv.owner_id,
+      ...db.prepare('SELECT user_id FROM thread_members WHERE conversation_id = ?').all(conv.id).map((r) => r.user_id)]
+      .filter((u) => u !== req.user.id && authz.isMember(conv.project_id, u));
+    const fileId = db.transaction(() => {
+      const r = db.prepare(`INSERT INTO files (owner_id, project_id, name, mime, size, storage_path, kind, extracted_text, extract_note, visibility, source_conversation_id)
+        VALUES (?,?,?,?,?,?,'text',?,?,'private',?)`).run(req.user.id, conv.project_id, name, mime, buf.length, storagePath,
+        md, 'AI 가 대화에서 만든 문서', conv.id);
+      const fid = Number(r.lastInsertRowid);
+      const share = db.prepare('INSERT OR IGNORE INTO file_shares (file_id, user_id) VALUES (?,?)');
+      for (const u of viewers) share.run(fid, u);
+      db.prepare('INSERT OR IGNORE INTO conversation_files (conversation_id, file_id) VALUES (?,?)').run(conv.id, fid);
+      const where = conv.project_id == null ? '내 파일에' : `프로젝트 파일 저장소에${viewers.length ? ` (이 스레드 참여자 ${viewers.length}명과 공유)` : ''}`;
+      db.prepare('INSERT INTO messages (conversation_id, author_id, role, content, ai_model) VALUES (?,?,?,?,?)')
+        .run(conv.id, null, 'assistant', `📝 ${req.user.name}님의 요청으로 문서 **${name}** 을(를) 만들어 ${where} 저장했습니다.`, me.apiKey ? me.model : null);
+      db.prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?").run(conv.id);
+      return fid;
+    })();
+    res.json({ file: fileOut(db.prepare('SELECT * FROM files WHERE id = ?').get(fileId)), conversation: convDetail(req.user.id, conv.id) });
   }));
 
   // ---------- 프로젝트 ----------

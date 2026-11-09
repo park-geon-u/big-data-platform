@@ -126,6 +126,10 @@ function openDb(file) {
   if (!db.prepare('PRAGMA table_info(messages)').all().some((c) => c.name === 'ai_model')) {
     db.exec('ALTER TABLE messages ADD COLUMN ai_model TEXT');
   }
+  // 3차: AI 가 만든 문서는 어느 대화에서 만들었는지 기록
+  if (!db.prepare('PRAGMA table_info(files)').all().some((c) => c.name === 'source_conversation_id')) {
+    db.exec('ALTER TABLE files ADD COLUMN source_conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL');
+  }
   return db;
 }
 
