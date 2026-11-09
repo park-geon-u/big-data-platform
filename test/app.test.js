@@ -218,6 +218,87 @@ test('사용자마다 자기 AI 키(Claude·GPT·Gemini)를 따로 쓴다', asyn
   assert.equal((await client().get('/api/me/ai')).status, 401);
 });
 
+test('2차: 초대 → 수락, 파일 개별 공유, 스레드 공유, 내보내면 즉시 차단', async () => {
+  const C = client(); const D = client();
+  await C.post('/api/auth/signup', { email: 'c@x.com', name: 'C', password: 'password3' });
+  await D.post('/api/auth/signup', { email: 'd@x.com', name: 'D', password: 'password4' });
+  const cId = db.prepare("SELECT id FROM users WHERE email='c@x.com'").get().id;
+  const dId = db.prepare("SELECT id FROM users WHERE email='d@x.com'").get().id;
+  const Q = (await A.post('/api/projects', { name: '프로젝트 Q' })).body;
+
+  // 초대: 소유자만, 가입자만
+  assert.equal((await A.post(`/api/projects/${Q.id}/invites`, { email: 'nobody@x.com' })).status, 404);
+  assert.equal((await C.post(`/api/projects/${Q.id}/invites`, { email: 'd@x.com' })).status, 404); // 멤버가 아니면 존재도 모름
+  const inv = await A.post(`/api/projects/${Q.id}/invites`, { email: 'C@x.com' });
+  assert.equal(inv.status, 200);
+  assert.equal(inv.body.invites.length, 1);
+  // 초대만으로는 멤버가 아니다
+  assert.equal((await C.get(`/api/projects/${Q.id}`)).status, 404);
+  const cInv = (await C.get('/api/invites')).body.invites;
+  assert.equal(cInv[0].projectName, '프로젝트 Q');
+  // D 가 C 의 초대를 대신 수락할 수 없다
+  assert.equal((await D.post(`/api/invites/${cInv[0].id}/accept`)).status, 404);
+  assert.equal((await C.post(`/api/invites/${cInv[0].id}/accept`)).status, 200);
+  assert.equal((await C.get(`/api/projects/${Q.id}`)).body.role, 'member');
+  // 멤버는 초대·내보내기 불가
+  assert.equal((await C.post(`/api/projects/${Q.id}/invites`, { email: 'd@x.com' })).status, 403);
+  assert.equal((await A.post(`/api/projects/${Q.id}/invites`, { email: 'c@x.com' })).status, 409);
+  // D 도 초대 → 수락
+  await A.post(`/api/projects/${Q.id}/invites`, { email: 'd@x.com' });
+  await D.post(`/api/invites/${(await D.get('/api/invites')).body.invites[0].id}/accept`);
+
+  // 파일 개별 공유: A 의 파일을 C 에게만
+  const f = (await A.upload('report.docx', { projectId: Q.id })).body.file;
+  assert.equal((await C.get(`/api/files/${f.id}`)).status, 404);
+  assert.equal((await C.raw('PUT', `/api/files/${f.id}/shares`, { userIds: [cId] })).status, 404); // 남의 파일 공유 불가
+  const outsider = db.prepare("SELECT id FROM users WHERE email='b@x.com'").get().id;
+  assert.equal((await A.raw('PUT', `/api/files/${f.id}/shares`, { userIds: [outsider] })).status, 400); // 멤버가 아니면 공유 불가
+  assert.equal((await A.raw('PUT', `/api/files/${f.id}/shares`, { userIds: [cId] })).status, 200);
+  assert.equal((await C.get(`/api/files/${f.id}`)).status, 200);
+  assert.equal((await C.get(`/api/files/${f.id}/download`)).status, 200);
+  assert.equal((await D.get(`/api/files/${f.id}`)).status, 404);
+  assert.deepEqual((await C.get(`/api/projects/${Q.id}`)).body.files.map((x) => x.id), [f.id]);
+  assert.equal((await D.get(`/api/projects/${Q.id}`)).body.files.length, 0);
+  assert.equal((await C.get(`/api/projects/${Q.id}`)).body.files[0].sharedWith, undefined); // 공유 대상 목록은 올린 사람만
+
+  // 스레드 공유
+  const t = (await A.post(`/api/projects/${Q.id}/threads`)).body;
+  await A.post(`/api/conversations/${t.id}/files`, { fileId: f.id });
+  assert.equal((await C.raw('PUT', `/api/conversations/${t.id}/members`, { userId: dId, permission: 'read' })).status, 404);
+  assert.equal((await A.raw('PUT', `/api/conversations/${t.id}/members`, { userId: outsider, permission: 'read' })).status, 400);
+  assert.equal((await A.raw('PUT', `/api/conversations/${t.id}/members`, { userId: cId, permission: 'admin' })).status, 400);
+  const sh = await A.raw('PUT', `/api/conversations/${t.id}/members`, { userId: cId, permission: 'participate' });
+  assert.equal(sh.status, 200);
+  assert.equal(sh.body.files[0].usable, true); // C 가 볼 수 있으니 AI 가 사용
+  seen.length = 0;
+  assert.equal((await C.post(`/api/conversations/${t.id}/messages`, { content: 'C 의 질문' })).status, 200);
+  assert.deepEqual(seen[0], ['report.docx']);
+  // D 에게 읽기로 공유하면 D 는 파일을 못 보므로 AI 입력에서 빠진다
+  const sh2 = await A.raw('PUT', `/api/conversations/${t.id}/members`, { userId: dId, permission: 'read' });
+  assert.equal(sh2.body.files[0].usable, false);
+  assert.equal((await D.get(`/api/conversations/${t.id}`)).body.files.length, 0); // D 에게 파일 정보도 안 보임
+  assert.equal((await D.post(`/api/conversations/${t.id}/messages`, { content: '몰래' })).status, 403);
+  seen.length = 0;
+  await A.post(`/api/conversations/${t.id}/messages`, { content: '다시' });
+  assert.deepEqual(seen[0], []);
+  // 공유 해제 → 즉시 차단
+  await A.del(`/api/conversations/${t.id}/members/${dId}`);
+  assert.equal((await D.get(`/api/conversations/${t.id}`)).status, 404);
+
+  // C 를 내보내면 공유받은 스레드·파일 모두 즉시 차단
+  assert.equal((await C.del(`/api/projects/${Q.id}/members/${dId}`)).status, 403);
+  assert.equal((await A.del(`/api/projects/${Q.id}/members/${cId}`)).status, 200);
+  assert.equal((await C.get(`/api/conversations/${t.id}`)).status, 404);
+  assert.equal((await C.get(`/api/files/${f.id}`)).status, 404);
+  assert.equal((await C.get(`/api/projects/${Q.id}`)).status, 404);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM file_shares WHERE user_id = ?').get(cId).n, 0);
+  // 소유자는 나갈 수 없고, 멤버는 스스로 나갈 수 있다
+  const aId = db.prepare("SELECT id FROM users WHERE email='a@x.com'").get().id;
+  assert.equal((await A.del(`/api/projects/${Q.id}/members/${aId}`)).status, 400);
+  assert.equal((await D.del(`/api/projects/${Q.id}/members/${dId}`)).status, 200);
+  assert.equal((await D.get(`/api/projects/${Q.id}`)).status, 404);
+});
+
 test('잘못된 ID·로그아웃 처리', async () => {
   assert.equal((await A.get('/api/conversations/abc')).status, 404);
   assert.equal((await A.get('/api/files/999999')).status, 404);

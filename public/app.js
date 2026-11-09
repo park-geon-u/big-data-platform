@@ -65,12 +65,24 @@ $('#logout').addEventListener('click', async () => { await api('/api/auth/logout
 
 // ---------- 사이드바 ----------
 async function loadSidebar() {
-  const [c, p] = await Promise.all([api('/api/conversations'), api('/api/projects')]);
-  state.convs = c.conversations; state.projects = p.projects;
+  const [c, p, i] = await Promise.all([api('/api/conversations'), api('/api/projects'), api('/api/invites')]);
+  state.convs = c.conversations; state.projects = p.projects; state.invites = i.invites;
   renderSidebar();
 }
 function renderSidebar() {
   const h = location.hash;
+  $('#invite-box').innerHTML = state.invites?.length ? `<h3>받은 초대</h3><ul class="list">${state.invites.map((v) => `
+    <li style="padding:6px 10px;font-size:13px;background:#1f2937;border-radius:8px;margin-bottom:6px">
+      <b>${esc(v.inviterName)}</b>님이 📁 <b>${esc(v.projectName)}</b> 에 초대했습니다.
+      <div style="margin-top:6px;display:flex;gap:6px"><button class="primary small" data-acc="${v.id}">수락</button><button class="small" data-dec="${v.id}" style="background:none;color:#e5e7eb">거절</button></div>
+    </li>`).join('')}</ul>` : '';
+  $('#invite-box').querySelectorAll('[data-acc]').forEach((b) => b.addEventListener('click', async () => {
+    const r = await api(`/api/invites/${b.dataset.acc}/accept`, { method: 'POST' });
+    await loadSidebar(); location.hash = `#/project/${r.projectId}`; toast('프로젝트에 참여했습니다.');
+  }));
+  $('#invite-box').querySelectorAll('[data-dec]').forEach((b) => b.addEventListener('click', async () => {
+    await api(`/api/invites/${b.dataset.dec}/decline`, { method: 'POST' }); await loadSidebar();
+  }));
   $('#conv-list').innerHTML = state.convs.map((c) => `<li><a href="#/chat/${c.id}" class="${h === `#/chat/${c.id}` ? 'active' : ''}">${esc(c.title)}</a></li>`).join('')
     || '<li class="muted" style="padding:6px 10px;font-size:13px">아직 대화가 없습니다</li>';
   $('#project-list').innerHTML = state.projects.map((p) => `<li><a href="#/project/${p.id}" class="${h.startsWith(`#/project/${p.id}`) ? 'active' : ''}">📁 ${esc(p.name)}</a></li>`).join('')
@@ -144,7 +156,8 @@ async function renderChat(convId) {
       ${isThread ? `<a class="crumb" href="#/project/${c.projectId}">📁 ${esc(project?.name || '프로젝트')} /</a>` : ''}
       <h2 id="conv-title" title="${esc(c.title)}">${esc(c.title)}</h2>
       ${canWrite ? aiPickerHtml() : ''}
-      ${c.permission !== 'owner' ? `<span class="badge">${c.permission === 'read' ? '읽기 전용' : '참여'}</span>` : ''}
+      ${c.permission !== 'owner' ? `<span class="badge">${esc(c.ownerName)}님의 스레드 · ${c.permission === 'read' ? '읽기 전용' : '참여'}</span>` : ''}
+      ${isThread && c.permission === 'owner' ? `<button class="small" id="share">👥 공유${c.members.length ? ` (${c.members.length})` : ''}</button>` : ''}
       ${c.permission === 'owner' ? '<button class="small" id="rename">이름 변경</button><button class="small danger" id="del">삭제</button>' : ''}
     </div>
     <div class="messages" id="msgs"></div>
@@ -167,14 +180,16 @@ async function renderChat(convId) {
       </div>`).join('')
       : `<div class="empty"><h2>무엇을 도와드릴까요?</h2><p>📎 로 파일을 올리면 AI 가 내용을 읽고 답합니다.<br><span class="muted" style="font-size:13px">${esc(state.info.supportedFiles)}</span></p></div>`;
     box.scrollTop = box.scrollHeight;
-    $('#atts').innerHTML = conv.files.map((f) => `<span class="chip ${f.kind === 'unsupported' ? 'warn' : ''}" title="${esc(f.note || KIND[f.kind])}">
-      <span>📄 ${esc(f.name)}</span>${canWrite ? `<button data-detach="${f.id}" title="대화에서 빼기">✕</button>` : ''}</span>`).join('');
+    $('#atts').innerHTML = conv.files.map((f) => `<span class="chip ${f.kind === 'unsupported' || !f.usable ? 'warn' : ''}"
+      title="${esc(!f.usable ? '스레드 참여자 중 이 파일을 볼 수 없는 사람이 있어 AI 가 사용하지 않습니다.' : (f.note || KIND[f.kind]))}">
+      <span>${f.usable ? '📄' : '🚫'} ${esc(f.name)}</span>${canWrite ? `<button data-detach="${f.id}" title="대화에서 빼기">✕</button>` : ''}</span>`).join('');
     $('#atts').querySelectorAll('[data-detach]').forEach((b) => b.addEventListener('click', async () => {
       paint(await api(`/api/conversations/${convId}/files/${b.dataset.detach}`, { method: 'DELETE' }));
     }));
   };
   paint(c);
 
+  $('#share')?.addEventListener('click', () => openThreadShare(c, () => renderChat(convId)));
   $('#rename')?.addEventListener('click', async () => {
     const t = prompt('새 이름', c.title); if (!t) return;
     await api(`/api/conversations/${convId}`, { method: 'PATCH', body: { title: t } });
@@ -250,7 +265,7 @@ async function renderProject(pid) {
       <div class="card"><h2>대화 스레드 <button class="primary small" id="new-thread">+ 새 스레드</button></h2>
         <ul class="rows">${p.threads.map((t) => `<li><a class="grow" href="#/project/${pid}/thread/${t.id}">💬 ${esc(t.title)}</a>
           <span class="muted" style="font-size:12px">${t.permission === 'owner' ? '내 스레드' : `${esc(t.ownerName)} · ${t.permission === 'read' ? '읽기' : '참여'}`}</span></li>`).join('')
-          || '<li class="muted">스레드가 없습니다. 스레드는 만든 사람에게만 보입니다.</li>'}</ul>
+          || '<li class="muted">스레드가 없습니다. 스레드는 만든 사람과 공유받은 사람에게만 보입니다.</li>'}</ul>
       </div>
       <div class="card"><h2>파일 저장소</h2>
         <div class="drop" id="drop">여기에 파일을 끌어다 놓거나 <button class="link" id="up">파일 선택</button><br>
@@ -260,14 +275,21 @@ async function renderProject(pid) {
           <span class="grow" title="${esc(f.note || '')}"><a href="#" data-view="${f.id}">📄 ${esc(f.name)}</a>
             <span class="muted" style="font-size:12px"> · ${fmtSize(f.size)} · ${KIND[f.kind]}${f.ownerId !== state.me.id ? ` · ${esc(f.ownerName)}` : ''}</span></span>
           ${f.ownerId === state.me.id ? `<select data-vis="${f.id}" style="width:auto;padding:4px 6px;font-size:12px">
-              <option value="private" ${f.visibility === 'private' ? 'selected' : ''}>나만 보기</option>
+              <option value="private" ${f.visibility === 'private' && !f.sharedWith.length ? 'selected' : ''}>나만 보기</option>
+              <option value="some" ${f.visibility === 'private' && f.sharedWith.length ? 'selected' : ''}>일부 공유 (${f.sharedWith.length}명)</option>
               <option value="project" ${f.visibility === 'project' ? 'selected' : ''}>프로젝트 공개</option></select>
-            <button class="small danger" data-delf="${f.id}">삭제</button>` : '<span class="badge">공개됨</span>'}
+            <button class="small danger" data-delf="${f.id}">삭제</button>` : `<span class="badge">${f.visibility === 'project' ? '프로젝트 공개' : '나에게 공유됨'}</span>`}
         </li>`).join('') || '<li class="muted">파일이 없습니다.</li>'}</ul>
       </div>
       <div class="card"><h2>참여자</h2>
-        <ul class="rows">${p.members.map((m) => `<li><span class="grow">${esc(m.name)} <span class="muted">${esc(m.email)}</span></span><span class="badge">${m.role === 'owner' ? '소유자' : '멤버'}</span></li>`).join('')}</ul>
-        <p class="muted" style="font-size:12px">초대 기능은 2차 단계에서 추가됩니다.</p>
+        <ul class="rows">${p.members.map((m) => `<li><span class="grow">${esc(m.name)} <span class="muted">${esc(m.email)}</span></span>
+          <span class="badge">${m.role === 'owner' ? '소유자' : '멤버'}</span>
+          ${isOwner && m.role !== 'owner' ? `<button class="small danger" data-kick="${m.id}" data-name="${esc(m.name)}">내보내기</button>` : ''}</li>`).join('')}
+          ${p.invites.map((v) => `<li><span class="grow muted">${esc(v.name)} ${esc(v.email)}</span><span class="badge" style="background:#fef3c7;color:#92400e">초대 대기</span>
+            <button class="small" data-uninv="${v.id}">취소</button></li>`).join('')}</ul>
+        ${isOwner ? `<form id="inv" style="display:flex;gap:8px;margin-top:10px"><input name="email" type="email" required placeholder="초대할 사람의 가입 이메일"><button class="primary small">초대</button></form>
+          <p class="muted" style="font-size:12px">초대받은 사람이 수락하면 참여자가 됩니다. 참여자가 되어도 다른 사람의 비공개 스레드·파일은 자동으로 보이지 않습니다.</p>`
+    : '<button class="small danger" id="leave" style="margin-top:10px">프로젝트 나가기</button>'}
       </div>
     </div></div>`;
 
@@ -290,6 +312,22 @@ async function renderProject(pid) {
     await api(`/api/projects/${pid}`, { method: 'DELETE' }); await loadSidebar(); location.hash = '';
   });
 
+  $('#inv')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try { await api(`/api/projects/${pid}/invites`, { method: 'POST', body: { email: e.target.email.value } }); toast('초대를 보냈습니다.'); renderProject(pid); } catch (err) { toast(err.message); }
+  });
+  document.querySelectorAll('[data-uninv]').forEach((b) => b.addEventListener('click', async () => {
+    await api(`/api/projects/${pid}/invites/${b.dataset.uninv}`, { method: 'DELETE' }); renderProject(pid);
+  }));
+  document.querySelectorAll('[data-kick]').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm(`${b.dataset.name}님을 내보낼까요? 공유받은 스레드·파일 접근도 바로 막힙니다.`)) return;
+    await api(`/api/projects/${pid}/members/${b.dataset.kick}`, { method: 'DELETE' }); toast('내보냈습니다.'); renderProject(pid);
+  }));
+  $('#leave')?.addEventListener('click', async () => {
+    if (!confirm('이 프로젝트에서 나갈까요?')) return;
+    await api(`/api/projects/${pid}/members/${state.me.id}`, { method: 'DELETE' }); await loadSidebar(); location.hash = '';
+  });
+
   const uploadFiles = async (files) => {
     for (const file of files) {
       toast(`"${file.name}" 올리는 중…`);
@@ -309,13 +347,65 @@ async function renderProject(pid) {
   drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('over'); uploadFiles([...e.dataTransfer.files]); });
 
   document.querySelectorAll('[data-vis]').forEach((s) => s.addEventListener('change', async () => {
-    try { await api(`/api/files/${s.dataset.vis}`, { method: 'PATCH', body: { visibility: s.value } }); toast('공개 범위를 바꿨습니다.'); } catch (err) { toast(err.message); renderProject(pid); }
+    const f = p.files.find((x) => x.id === +s.dataset.vis);
+    try {
+      if (s.value === 'some') return openFileShare(f, p.members, () => renderProject(pid));
+      await api(`/api/files/${f.id}`, { method: 'PATCH', body: { visibility: s.value } });
+      if (s.value === 'private' && f.sharedWith.length) await api(`/api/files/${f.id}/shares`, { method: 'PUT', body: { userIds: [] } });
+      toast('공개 범위를 바꿨습니다.'); renderProject(pid);
+    } catch (err) { toast(err.message); renderProject(pid); }
   }));
   document.querySelectorAll('[data-delf]').forEach((b) => b.addEventListener('click', async () => {
     if (!confirm('파일을 삭제할까요?')) return;
     await api(`/api/files/${b.dataset.delf}`, { method: 'DELETE' }); renderProject(pid);
   }));
   document.querySelectorAll('[data-view]').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); previewFile(+a.dataset.view); }));
+}
+
+// 파일을 특정 멤버에게만 공유
+function openFileShare(f, members, done) {
+  const others = members.filter((m) => m.id !== state.me.id);
+  openModal(`<h2>"${esc(f.name)}" 공유할 사람</h2>
+    ${others.length ? `<ul class="rows">${others.map((m) => `<li><label style="display:flex;gap:8px;align-items:center;margin:0;color:inherit;font-size:14px">
+      <input type="checkbox" value="${m.id}" style="width:auto" ${f.sharedWith.includes(m.id) ? 'checked' : ''}> ${esc(m.name)} <span class="muted">${esc(m.email)}</span></label></li>`).join('')}</ul>`
+    : '<p class="muted">공유할 다른 참여자가 없습니다. 먼저 프로젝트에 초대해 주세요.</p>'}
+    <div class="modal-actions"><button data-close>취소</button><button class="primary" id="fs-save">저장</button></div>`, (card) => {
+    $('#fs-save', card).addEventListener('click', async () => {
+      const userIds = [...card.querySelectorAll('input:checked')].map((i) => +i.value);
+      try {
+        if (f.visibility === 'project') await api(`/api/files/${f.id}`, { method: 'PATCH', body: { visibility: 'private' } });
+        await api(`/api/files/${f.id}/shares`, { method: 'PUT', body: { userIds } });
+        closeModal(); toast(userIds.length ? `${userIds.length}명에게 공유했습니다.` : '나만 보기로 바꿨습니다.'); done();
+      } catch (err) { toast(err.message); }
+    });
+    card.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', done));
+  });
+}
+
+// 스레드 공유: 프로젝트 참여자마다 공유 안 함 / 읽기 / 참여
+async function openThreadShare(c, done) {
+  const p = await api(`/api/projects/${c.projectId}`);
+  const others = p.members.filter((m) => m.id !== state.me.id);
+  const cur = Object.fromEntries(c.members.map((m) => [m.id, m.permission]));
+  openModal(`<h2>스레드 공유</h2>
+    <p class="muted" style="font-size:13px">읽기: 대화를 볼 수만 있음 · 참여: 메시지 작성과 AI 질문 가능. 공유하면 이 스레드의 AI 는 모든 참여자가 볼 수 있는 파일만 사용합니다.</p>
+    ${others.length ? `<ul class="rows">${others.map((m) => `<li><span class="grow">${esc(m.name)} <span class="muted">${esc(m.email)}</span></span>
+      <select data-tm="${m.id}" style="width:auto;padding:4px 6px;font-size:13px">
+        <option value="">공유 안 함</option>
+        <option value="read" ${cur[m.id] === 'read' ? 'selected' : ''}>읽기</option>
+        <option value="participate" ${cur[m.id] === 'participate' ? 'selected' : ''}>참여</option></select></li>`).join('')}</ul>`
+    : '<p class="muted">공유할 다른 참여자가 없습니다. 먼저 프로젝트에 초대해 주세요.</p>'}
+    <div class="modal-actions"><button data-close>닫기</button></div>`, (card) => {
+    card.querySelectorAll('[data-tm]').forEach((sel) => sel.addEventListener('change', async () => {
+      const uid = sel.dataset.tm;
+      try {
+        if (sel.value) await api(`/api/conversations/${c.id}/members`, { method: 'PUT', body: { userId: +uid, permission: sel.value } });
+        else await api(`/api/conversations/${c.id}/members/${uid}`, { method: 'DELETE' });
+        toast(sel.value ? '공유 권한을 바꿨습니다.' : '공유를 해제했습니다. 이제 이 사람은 스레드를 볼 수 없습니다.');
+      } catch (err) { toast(err.message); }
+    }));
+    card.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', done));
+  });
 }
 
 async function previewFile(fid) {

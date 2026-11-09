@@ -15,6 +15,7 @@ function makeAuthz(db) {
     conv: db.prepare('SELECT * FROM conversations WHERE id = ?'),
     threadMember: db.prepare('SELECT permission FROM thread_members WHERE conversation_id = ? AND user_id = ?'),
     file: db.prepare('SELECT * FROM files WHERE id = ?'),
+    fileShare: db.prepare('SELECT 1 FROM file_shares WHERE file_id = ? AND user_id = ?'),
   };
 
   /** 프로젝트 멤버인지. 아니면 404. */
@@ -53,18 +54,32 @@ function makeAuthz(db) {
   }
 
   /** 메시지 작성·AI 질문 가능 여부 (참여 이상) */
+  /** 스레드를 만든 사람만 (공유 설정 등) */
+  function conversationOwner(userId, convId) {
+    const r = conversation(userId, convId);
+    if (r.permission !== 'owner') throw forbidden('스레드를 만든 사람만 할 수 있습니다.');
+    return r;
+  }
+
+  /** 지금 그 프로젝트 멤버인지 (공유·초대 대상 확인용) */
+  function isMember(projectId, userId) { return !!q.member.get(projectId, userId); }
+
   function conversationWrite(userId, convId) {
     const r = conversation(userId, convId);
     if (r.permission === 'read') throw forbidden('읽기 권한만 있어 메시지를 쓸 수 없습니다.');
     return r;
   }
 
-  /** 파일 열람 권한 */
+  /**
+   * 파일 열람 권한.
+   * 개인 파일: 올린 사람만. 프로젝트 파일: 지금 그 프로젝트 멤버여야 하고 (내보내지면 바로 차단),
+   * 올린 사람이거나, 프로젝트 전체 공개이거나, 나에게 개별 공유된 파일이어야 한다.
+   */
   function canReadFile(userId, f) {
-    if (f.owner_id === userId) return true;
-    if (f.project_id == null) return false;
-    if (f.visibility !== 'project') return false;
-    return !!q.member.get(f.project_id, userId);
+    if (f.project_id == null) return f.owner_id === userId;
+    if (!q.member.get(f.project_id, userId)) return false;
+    if (f.owner_id === userId || f.visibility === 'project') return true;
+    return !!q.fileShare.get(f.id, userId);
   }
 
   function file(userId, fileId) {
@@ -92,7 +107,7 @@ function makeAuthz(db) {
     return viewers.every((uid) => canReadFile(uid, f));
   }
 
-  return { project, projectOwner, conversation, conversationWrite, file, fileOwner, canReadFile, fileUsableInConversation };
+  return { project, projectOwner, conversation, conversationOwner, conversationWrite, isMember, file, fileOwner, canReadFile, fileUsableInConversation };
 }
 
 module.exports = { makeAuthz, HttpError, notFound, forbidden };

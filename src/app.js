@@ -171,10 +171,15 @@ function createApp({ dbFile, uploadDir, dataDir, generateReply = ai.generateRepl
     const messages = db.prepare(`SELECT m.id, m.role, m.content, m.ai_model AS aiModel, m.created_at AS createdAt, m.author_id AS authorId, u.name AS authorName
       FROM messages m LEFT JOIN users u ON u.id = m.author_id WHERE m.conversation_id = ? ORDER BY m.id`).all(conv.id);
     const files = db.prepare(`SELECT f.* FROM conversation_files cf JOIN files f ON f.id = cf.file_id WHERE cf.conversation_id = ?`)
-      .all(conv.id).filter((f) => authz.canReadFile(userId, f)).map(fileOut);
+      .all(conv.id).filter((f) => authz.canReadFile(userId, f))
+      // usable=false: 스레드 참여자 중 이 파일을 못 보는 사람이 있어 AI 가 쓰지 않는 파일
+      .map((f) => ({ ...fileOut(f), usable: authz.fileUsableInConversation(conv, f) }));
+    const members = conv.project_id == null ? [] : db.prepare(`SELECT u.id, u.name, u.email, tm.permission FROM thread_members tm
+      JOIN users u ON u.id = tm.user_id WHERE tm.conversation_id = ? ORDER BY u.name`).all(conv.id);
+    const owner = db.prepare('SELECT name FROM users WHERE id = ?').get(conv.owner_id);
     return {
-      id: conv.id, title: conv.title, projectId: conv.project_id, ownerId: conv.owner_id,
-      permission, messages, files, createdAt: conv.created_at,
+      id: conv.id, title: conv.title, projectId: conv.project_id, ownerId: conv.owner_id, ownerName: owner?.name,
+      permission, messages, files, members, createdAt: conv.created_at,
     };
   }
 
@@ -291,12 +296,20 @@ function createApp({ dbFile, uploadDir, dataDir, generateReply = ai.generateRepl
       LEFT JOIN thread_members tm ON tm.conversation_id = c.id AND tm.user_id = ?
       WHERE c.project_id = ? AND (c.owner_id = ? OR tm.user_id IS NOT NULL)
       ORDER BY c.updated_at DESC`).all(userId, userId, pid, userId);
+    const shareStmt = db.prepare('SELECT user_id FROM file_shares WHERE file_id = ?');
     const files = db.prepare(`SELECT f.*, u.name AS owner_name FROM files f JOIN users u ON u.id = f.owner_id
-      WHERE f.project_id = ? AND (f.owner_id = ? OR f.visibility = 'project') ORDER BY f.created_at DESC`).all(pid, userId)
-      .map((f) => ({ ...fileOut(f), ownerName: f.owner_name }));
+      WHERE f.project_id = ? ORDER BY f.created_at DESC`).all(pid)
+      .filter((f) => authz.canReadFile(userId, f))
+      .map((f) => ({
+        ...fileOut(f), ownerName: f.owner_name,
+        // 개별 공유 대상은 파일을 올린 사람에게만 보여 준다
+        sharedWith: f.owner_id === userId ? shareStmt.all(f.id).map((r) => r.user_id) : undefined,
+      }));
     const members = db.prepare(`SELECT u.id, u.name, u.email, pm.role FROM project_members pm JOIN users u ON u.id = pm.user_id
       WHERE pm.project_id = ? ORDER BY pm.role DESC, u.name`).all(pid);
-    return { id: project.id, name: project.name, description: project.description, role, threads, files, members };
+    const invites = role !== 'owner' ? [] : db.prepare(`SELECT i.id, u.name, u.email, i.created_at AS createdAt FROM project_invites i
+      JOIN users u ON u.id = i.invitee_id WHERE i.project_id = ? ORDER BY i.id`).all(pid);
+    return { id: project.id, name: project.name, description: project.description, role, threads, files, members, invites };
   }
 
   app.get('/api/projects/:id', (req, res) => res.json(projectDetail(req.user.id, id(req.params.id))));
@@ -324,6 +337,105 @@ function createApp({ dbFile, uploadDir, dataDir, generateReply = ai.generateRepl
     const title = str(req.body.title, '제목', 100, { required: false }) || '새 스레드';
     const r = db.prepare('INSERT INTO conversations (owner_id, project_id, title) VALUES (?,?,?)').run(req.user.id, pid, title);
     res.json(convDetail(req.user.id, Number(r.lastInsertRowid)));
+  });
+
+  // ---------- 2차: 초대 · 멤버 ----------
+  // 소유자가 가입된 사용자를 이메일로 초대 → 받은 사람이 수락해야 멤버가 된다
+  app.post('/api/projects/:id/invites', (req, res) => {
+    const pid = id(req.params.id);
+    authz.projectOwner(req.user.id, pid);
+    const email = str(req.body.email, '이메일', 200).toLowerCase();
+    const u = db.prepare('SELECT id, name FROM users WHERE email = ?').get(email);
+    if (!u) throw new HttpError(404, '가입된 사용자가 아닙니다. 먼저 회원가입을 해 달라고 알려 주세요.');
+    if (authz.isMember(pid, u.id)) throw new HttpError(409, '이미 이 프로젝트의 참여자입니다.');
+    db.prepare('INSERT OR IGNORE INTO project_invites (project_id, inviter_id, invitee_id) VALUES (?,?,?)').run(pid, req.user.id, u.id);
+    res.json(projectDetail(req.user.id, pid));
+  });
+
+  app.delete('/api/projects/:id/invites/:inviteId', (req, res) => {
+    const pid = id(req.params.id);
+    authz.projectOwner(req.user.id, pid);
+    db.prepare('DELETE FROM project_invites WHERE id = ? AND project_id = ?').run(id(req.params.inviteId), pid);
+    res.json(projectDetail(req.user.id, pid));
+  });
+
+  // 나에게 온 초대
+  app.get('/api/invites', (req, res) => {
+    res.json({ invites: db.prepare(`SELECT i.id, p.id AS projectId, p.name AS projectName, u.name AS inviterName, i.created_at AS createdAt
+      FROM project_invites i JOIN projects p ON p.id = i.project_id JOIN users u ON u.id = i.inviter_id
+      WHERE i.invitee_id = ? ORDER BY i.id DESC`).all(req.user.id) });
+  });
+
+  const myInvite = (userId, inviteId) => {
+    const inv = db.prepare('SELECT * FROM project_invites WHERE id = ? AND invitee_id = ?').get(inviteId, userId);
+    if (!inv) throw notFound(); // 남의 초대는 수락할 수 없다
+    return inv;
+  };
+  app.post('/api/invites/:id/accept', (req, res) => {
+    const inv = myInvite(req.user.id, id(req.params.id));
+    db.transaction(() => {
+      db.prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, role) VALUES (?,?,'member')").run(inv.project_id, req.user.id);
+      db.prepare('DELETE FROM project_invites WHERE id = ?').run(inv.id);
+    })();
+    res.json({ projectId: inv.project_id });
+  });
+  app.post('/api/invites/:id/decline', (req, res) => {
+    const inv = myInvite(req.user.id, id(req.params.id));
+    db.prepare('DELETE FROM project_invites WHERE id = ?').run(inv.id);
+    res.json({ ok: true });
+  });
+
+  // 멤버 내보내기(소유자) 또는 스스로 나가기. 나가는 즉시 그 프로젝트의 공유 권한도 모두 회수.
+  app.delete('/api/projects/:id/members/:userId', (req, res) => {
+    const pid = id(req.params.id);
+    const target = id(req.params.userId);
+    const { role } = authz.project(req.user.id, pid);
+    if (target !== req.user.id && role !== 'owner') throw new HttpError(403, '프로젝트 소유자만 다른 사람을 내보낼 수 있습니다.');
+    const m = db.prepare('SELECT role FROM project_members WHERE project_id = ? AND user_id = ?').get(pid, target);
+    if (!m) throw notFound();
+    if (m.role === 'owner') throw new HttpError(400, '소유자는 나갈 수 없습니다. 프로젝트를 삭제해 주세요.');
+    db.transaction(() => {
+      db.prepare('DELETE FROM project_members WHERE project_id = ? AND user_id = ?').run(pid, target);
+      db.prepare('DELETE FROM thread_members WHERE user_id = ? AND conversation_id IN (SELECT id FROM conversations WHERE project_id = ?)').run(target, pid);
+      db.prepare('DELETE FROM file_shares WHERE user_id = ? AND file_id IN (SELECT id FROM files WHERE project_id = ?)').run(target, pid);
+    })();
+    res.json(target === req.user.id ? { ok: true } : projectDetail(req.user.id, pid));
+  });
+
+  // ---------- 2차: 스레드 공유 (읽기 / 참여) ----------
+  app.put('/api/conversations/:id/members', (req, res) => {
+    const { conv } = authz.conversationOwner(req.user.id, id(req.params.id));
+    if (conv.project_id == null) throw new HttpError(400, '개인 AI 대화는 공유할 수 없습니다. 프로젝트 스레드를 사용해 주세요.');
+    const target = id(req.body.userId);
+    const permission = req.body.permission;
+    if (!['read', 'participate'].includes(permission)) throw new HttpError(400, '권한은 read 또는 participate 입니다.');
+    if (target === req.user.id) throw new HttpError(400, '자기 자신에게는 공유할 수 없습니다.');
+    if (!authz.isMember(conv.project_id, target)) throw new HttpError(400, '같은 프로젝트 참여자에게만 공유할 수 있습니다.');
+    db.prepare(`INSERT INTO thread_members (conversation_id, user_id, permission) VALUES (?,?,?)
+      ON CONFLICT(conversation_id, user_id) DO UPDATE SET permission = excluded.permission`).run(conv.id, target, permission);
+    res.json(convDetail(req.user.id, conv.id));
+  });
+
+  app.delete('/api/conversations/:id/members/:userId', (req, res) => {
+    const { conv } = authz.conversationOwner(req.user.id, id(req.params.id));
+    db.prepare('DELETE FROM thread_members WHERE conversation_id = ? AND user_id = ?').run(conv.id, id(req.params.userId));
+    res.json(convDetail(req.user.id, conv.id));
+  });
+
+  // ---------- 2차: 파일을 특정 멤버에게 공유 ----------
+  app.put('/api/files/:id/shares', (req, res) => {
+    const f = authz.fileOwner(req.user.id, id(req.params.id));
+    if (f.project_id == null) throw new HttpError(400, '개인 파일은 공유할 수 없습니다. 프로젝트에 올린 파일만 공유됩니다.');
+    const userIds = Array.isArray(req.body.userIds) ? req.body.userIds.map(id) : [];
+    for (const u of userIds) {
+      if (!authz.isMember(f.project_id, u)) throw new HttpError(400, '같은 프로젝트 참여자에게만 공유할 수 있습니다.');
+    }
+    db.transaction(() => {
+      db.prepare('DELETE FROM file_shares WHERE file_id = ?').run(f.id);
+      const ins = db.prepare('INSERT OR IGNORE INTO file_shares (file_id, user_id) VALUES (?,?)');
+      for (const u of userIds) if (u !== f.owner_id) ins.run(f.id, u);
+    })();
+    res.json({ file: fileOut(f), sharedWith: db.prepare('SELECT user_id FROM file_shares WHERE file_id = ?').all(f.id).map((r) => r.user_id) });
   });
 
   // ---------- 파일 저장소 ----------

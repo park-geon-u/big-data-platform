@@ -75,6 +75,21 @@ function openDb(file) {
     visibility TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private','project')),
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+  -- 2차: 파일을 특정 멤버에게만 공유
+  CREATE TABLE IF NOT EXISTS file_shares (
+    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (file_id, user_id)
+  );
+  -- 2차: 프로젝트 초대 (가입한 사용자를 이메일로 초대 → 본인이 수락해야 멤버가 됨)
+  CREATE TABLE IF NOT EXISTS project_invites (
+    id INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    inviter_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    invitee_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (project_id, invitee_id)
+  );
   -- 대화에 참고 자료로 붙인 파일
   CREATE TABLE IF NOT EXISTS conversation_files (
     conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
