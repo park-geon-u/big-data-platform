@@ -190,6 +190,9 @@ test('사용자마다 자기 AI 키(Claude·GPT·Gemini)를 따로 쓴다', asyn
   const mismatch = await A.raw('PUT', '/api/me/ai/keys/google', { apiKey: GOOD.openai });
   assert.equal(mismatch.status, 400);
   assert.match(mismatch.body.error, /AIza/);
+  // 구글의 새 형식 키(AQ.)는 앞부분 검사에서 막히지 않고 실제 서버 확인으로 넘어간다
+  const aq = await A.raw('PUT', '/api/me/ai/keys/google', { apiKey: 'AQ.' + 'q'.repeat(40) });
+  assert.doesNotMatch(aq.body.error, /시작합니다/);
   assert.equal((await A.raw('PUT', '/api/me/ai/keys/llama', { apiKey: 'x' })).status, 400);
   // A 는 GPT 키, B 는 Gemini 키
   const ra = await A.raw('PUT', '/api/me/ai/keys/openai', { apiKey: GOOD.openai });

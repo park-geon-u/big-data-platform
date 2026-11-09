@@ -27,8 +27,8 @@ const PROVIDERS = {
     defaultModel: 'gpt-5-codex', fallbackModels: ['gpt-5-codex', 'codex-mini-latest'],
   },
   google: {
-    label: 'Gemini (Google)', keyPrefix: 'AIza', keyUrl: 'https://aistudio.google.com/apikey',
-    defaultModel: 'gemini-2.5-flash', fallbackModels: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+    label: 'Gemini (Google)', keyPrefix: ['AIza', 'AQ.'], keyUrl: 'https://aistudio.google.com/apikey',
+    defaultModel: 'gemini-3.5-flash', fallbackModels: ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-pro-latest', 'gemini-flash-latest'],
   },
 };
 
@@ -68,7 +68,8 @@ function friendlyError(provider, e) {
   const s = e.status;
   if (s === 401 || (s === 400 && /api key|API_KEY_INVALID/i.test(e.message))) return `${name} API 키가 올바르지 않습니다.`;
   if (s === 403) return `${name}: 이 키로는 권한이 없습니다. (${e.message})`;
-  if (s === 404) return `${name}: 이 키로 선택한 모델을 쓸 수 없습니다. 설정에서 다른 모델을 골라 주세요.`;
+  if (s === 404) return `${name}: 이 키로 선택한 모델을 쓸 수 없습니다. ⚙ 내 AI 설정에서 다른 모델을 골라 주세요. (${e.message.slice(0, 160)})`;
+  if (s === 503 || s === 529) return `${name}: 지금 사용자가 많아 잠시 응답하지 못합니다. 조금 뒤 다시 시도하거나 다른 모델을 골라 주세요.`;
   if (s === 429) return `${name}: 사용 한도를 넘었거나 크레딧이 부족합니다. (${e.message})`;
   return `${name} 오류: ${e.message}`;
 }
@@ -197,7 +198,7 @@ const adapters = {
       return (r.models || [])
         .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
         .map((m) => m.name.replace(/^models\//, ''))
-        .filter((id) => id.startsWith('gemini') && !/(embedding|tts|image|audio|live)/.test(id))
+        .filter((id) => id.startsWith('gemini') && !/(embedding|tts|image|audio|live|robotics|banana|transcribe|computer-use|customtools)/.test(id))
         .sort().reverse();
     },
   },

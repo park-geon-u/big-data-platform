@@ -129,13 +129,15 @@ function createApp({
     const key = String(req.body.apiKey || '').trim();
     if (!key) throw new HttpError(400, 'API 키를 입력해 주세요.');
     if (key.length > 300 || /\s/.test(key)) throw new HttpError(400, 'API 키 형식이 올바르지 않습니다.');
-    if (!key.startsWith(ai.PROVIDERS[p].keyPrefix)) {
-      throw new HttpError(400, `${ai.PROVIDERS[p].label} 키는 보통 "${ai.PROVIDERS[p].keyPrefix}" 로 시작합니다. 다른 회사의 키가 아닌지 확인해 주세요.`);
+    // 키 앞부분으로 다른 회사 키를 잘못 넣은 경우를 먼저 걸러낸다 (최종 확인은 아래에서 실제 서버로)
+    const prefixes = [].concat(ai.PROVIDERS[p].keyPrefix);
+    if (!prefixes.some((x) => key.startsWith(x))) {
+      throw new HttpError(400, `${ai.PROVIDERS[p].label} 키는 보통 ${prefixes.map((x) => `"${x}"`).join(' 또는 ')} 로 시작합니다. 다른 회사의 키가 아닌지 확인해 주세요.`);
     }
     let models;
     try { models = await listModels(p, key); } catch (e) { throw new HttpError(400, e.message); }
     const def = ai.PROVIDERS[p].defaultModel;
-    userAI.saveKey(req.user.id, p, key, models.includes(def) ? def : models[0]);
+    userAI.saveKey(req.user.id, p, key, models.includes(def) ? def : (models.find((m) => m.includes('latest')) || models[0]));
     // 처음 넣은 키라면 바로 그 AI 를 쓰도록
     if (!userAI.active(req.user.id).apiKey) userAI.setActive(req.user.id, p);
     res.json({ ...userAI.summary(req.user.id), models });

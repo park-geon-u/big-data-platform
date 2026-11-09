@@ -63,7 +63,7 @@ function makeUserAI(db, { dataDir }) {
       return {
         active: { provider: active.provider, model: active.model, hasKey: !!active.apiKey },
         providers: Object.entries(PROVIDERS).map(([id, p]) => ({
-          id, label: p.label, keyUrl: p.keyUrl, keyPrefix: p.keyPrefix, keyOf: p.keyOf || null, note: p.note || null,
+          id, label: p.label, keyUrl: p.keyUrl, keyPrefix: [].concat(p.keyPrefix)[0], keyOf: p.keyOf || null, note: p.note || null,
           hasKey: !!rows[keyOf(id)], keyHint: rows[keyOf(id)]?.key_hint || null,
           model: modelFor(userId, id), suggestedModels: p.fallbackModels,
         })),
