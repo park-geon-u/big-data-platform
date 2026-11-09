@@ -18,7 +18,27 @@ function loadSecret(dataDir) {
   return Buffer.from(fs.readFileSync(file, 'utf8').trim(), 'hex');
 }
 
-function makeUserAI(db, { dataDir }) {
+// 한국 날짜 기준 (자정에 횟수 초기화)
+const today = () => new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 10);
+
+/**
+ * @param freeAI 서버 기본 AI 설정 {provider, model, apiKey, dailyLimit}. apiKey 가 없으면 꺼짐.
+ *   개인 키를 등록하지 않은 사용자는 이 키로 하루 dailyLimit 회까지 쓸 수 있다.
+ */
+function makeUserAI(db, { dataDir, freeAI = {} }) {
+  const free = {
+    provider: PROVIDERS[freeAI.provider] ? freeAI.provider : 'google',
+    apiKey: freeAI.apiKey || null,
+    dailyLimit: Number.isInteger(freeAI.dailyLimit) && freeAI.dailyLimit >= 0 ? freeAI.dailyLimit : 5,
+  };
+  free.model = freeAI.model || PROVIDERS[free.provider].defaultModel;
+  const usage = {
+    get: db.prepare('SELECT count FROM free_ai_usage WHERE user_id = ? AND day = ?'),
+    inc: db.prepare(`INSERT INTO free_ai_usage (user_id, day, count) VALUES (?,?,1)
+      ON CONFLICT(user_id, day) DO UPDATE SET count = count + 1`),
+    dec: db.prepare('UPDATE free_ai_usage SET count = MAX(count - 1, 0) WHERE user_id = ? AND day = ?'),
+  };
+  const usedToday = (userId) => usage.get.get(userId, today())?.count || 0;
   const secret = loadSecret(dataDir);
   const encrypt = (plain) => {
     const iv = crypto.randomBytes(12);
@@ -60,8 +80,14 @@ function makeUserAI(db, { dataDir }) {
     summary(userId) {
       const rows = Object.fromEntries(q.keys.all(userId).map((r) => [r.provider, r]));
       const active = this.active(userId);
+      const used = usedToday(userId);
       return {
         active: { provider: active.provider, model: active.model, hasKey: !!active.apiKey },
+        // 개인 키가 없을 때 쓰는 무료 기본 AI
+        freeAI: free.apiKey ? {
+          enabled: true, label: PROVIDERS[free.provider].label, model: free.model,
+          limit: free.dailyLimit, used, remaining: Math.max(free.dailyLimit - used, 0), inUse: !active.apiKey,
+        } : { enabled: false },
         providers: Object.entries(PROVIDERS).map(([id, p]) => ({
           id, label: p.label, keyUrl: p.keyUrl, keyPrefix: [].concat(p.keyPrefix)[0], keyOf: p.keyOf || null, note: p.note || null,
           hasKey: !!rows[keyOf(id)], keyHint: rows[keyOf(id)]?.key_hint || null,
@@ -91,6 +117,25 @@ function makeUserAI(db, { dataDir }) {
       q.putKey.run(userId, provider, encrypt(key), `…${key.slice(-4)}`, model || PROVIDERS[provider].defaultModel);
     },
     deleteKey(userId, provider) { q.delKey.run(userId, provider); },
+    /**
+     * 실제로 질문에 쓸 AI. 개인 키가 있으면 그것, 없으면 무료 기본 AI, 그것도 없으면 데모.
+     * 무료 기본 AI 는 여기서 횟수를 하나 쓰고 (한도를 넘으면 limitReached), 실패하면 refund() 로 돌려준다.
+     */
+    resolve(userId) {
+      const mine = this.active(userId);
+      if (mine.apiKey || !free.apiKey) return { ...mine, isFree: false, refund() {} };
+      const day = today();
+      const ok = db.transaction(() => {
+        if ((usage.get.get(userId, day)?.count || 0) >= free.dailyLimit) return false;
+        usage.inc.run(userId, day);
+        return true;
+      })();
+      if (!ok) return { limitReached: true, limit: free.dailyLimit };
+      return {
+        provider: free.provider, model: free.model, apiKey: free.apiKey, isFree: true,
+        refund: () => usage.dec.run(userId, day),
+      };
+    },
     setActive(userId, provider, model) {
       q.putPref.run(userId, provider);
       if (model) q.putModelPref.run(userId, provider, model);

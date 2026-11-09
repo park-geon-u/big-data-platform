@@ -141,6 +141,8 @@ function renderHome() {
     <p>왼쪽에서 <b>새 대화</b>를 시작하거나 <b>프로젝트</b>를 만들어 파일을 올려 보세요.</p>
     <p class="muted" style="font-size:13px">AI 가 읽을 수 있는 파일: ${esc(state.info.supportedFiles)}</p>
     ${state.info.ai.active.hasKey ? `<p class="muted">지금 쓰는 AI: <b>${esc(state.info.ai.active.model)}</b></p>`
+    : state.info.ai.freeAI.enabled ? `<p class="chip" style="display:inline-block;padding:8px 12px">🎁 내 키 없이도 무료 기본 AI(${esc(state.info.ai.freeAI.model)})를 하루 ${state.info.ai.freeAI.limit}회 쓸 수 있습니다. 오늘 <b>${state.info.ai.freeAI.remaining}회</b> 남음.
+        <a href="#/settings">내 키를 등록</a>하면 제한 없이 쓸 수 있습니다.</p>`
     : '<p class="chip warn" style="display:inline-block;padding:8px 12px">아직 내 AI 키가 없어 데모 응답으로 동작합니다. <a href="#/settings">⚙ 내 AI 설정에서 Claude·GPT·Gemini 키 넣기</a></p>'}
   </div></div>`;
 }
@@ -220,7 +222,11 @@ async function renderChat(convId) {
     try {
       paint(await api(`/api/conversations/${convId}/messages`, { method: 'POST', body: { content: text } }));
       loadSidebar();
-    } catch (err) { toast(err.message); $('#typing')?.remove(); input.value = text; }
+    } catch (err) {
+      toast(err.message); $('#typing')?.remove(); input.value = text;
+      [...box.querySelectorAll('.msg.user')].pop()?.remove();
+    }
+    refreshFree();
     $('#send').disabled = false; input.focus();
   });
 
@@ -239,7 +245,7 @@ async function renderChat(convId) {
       $('#doc-go').disabled = true; $('#doc-go').textContent = 'AI 가 작성하는 중…'; $('#doc-err').textContent = '';
       try {
         const r = await api(`/api/conversations/${convId}/documents`, { method: 'POST', body });
-        closeModal(); paint(r.conversation); toast(`"${r.file.name}" 을(를) 저장했습니다.`); previewFile(r.file.id);
+        closeModal(); paint(r.conversation); toast(`"${r.file.name}" 을(를) 저장했습니다.`); previewFile(r.file.id); refreshFree();
       } catch (err) { $('#doc-err').textContent = err.message; $('#doc-go').disabled = false; $('#doc-go').textContent = '문서 만들기'; }
     });
   }));
@@ -445,7 +451,17 @@ function aiPickerHtml() {
   const ai = state.info.ai;
   const opts = ai.providers.map((p) => `<option value="${p.id}" ${p.id === ai.active.provider ? 'selected' : ''}>
     ${esc(p.label.split(' ')[0])} · ${esc(p.id === ai.active.provider ? ai.active.model : p.model)}${p.hasKey ? '' : ' (키 없음)'}</option>`).join('');
-  return `<select id="ai-pick" title="이 질문에 쓸 AI" style="width:auto;max-width:240px;padding:5px 8px;font-size:13px">${opts}</select>`;
+  return `<select id="ai-pick" title="이 질문에 쓸 AI" style="width:auto;max-width:240px;padding:5px 8px;font-size:13px">${opts}</select>
+    <span id="free-badge">${freeBadge()}</span>`;
+}
+/** 개인 키가 없을 때: 무료 기본 AI 남은 횟수 */
+function freeBadge() {
+  const ai = state.info.ai;
+  if (ai.active.hasKey || !ai.freeAI.enabled) return '';
+  return `<span class="badge" title="개인 키가 없어 무료 기본 AI(${esc(ai.freeAI.model)})로 답합니다" style="${ai.freeAI.remaining ? '' : 'background:#fee2e2;color:#991b1b'}">🎁 무료 ${ai.freeAI.remaining}/${ai.freeAI.limit}회 남음</span>`;
+}
+async function refreshFree() {
+  try { state.info.ai = await api('/api/me/ai'); const b = $('#free-badge'); if (b) b.innerHTML = freeBadge(); } catch { /* 무시 */ }
 }
 function bindAiPicker() {
   $('#ai-pick')?.addEventListener('change', async (e) => {
@@ -463,6 +479,9 @@ async function renderSettings() {
   state.info.ai = ai;
   $('#view').innerHTML = `<div class="page" style="max-width:720px">
     <div style="display:flex;gap:10px;align-items:center">${menuBtn}<h1>⚙ 내 AI 설정</h1></div>
+    ${ai.freeAI.enabled ? `<div class="card" style="margin-top:12px;background:var(--accent-weak);border-color:#c7d2fe">
+      <b>🎁 무료 기본 AI</b> — 개인 키를 등록하기 전까지 ${esc(ai.freeAI.label)} · ${esc(ai.freeAI.model)} 를 <b>하루 ${ai.freeAI.limit}회</b> 쓸 수 있습니다.
+      ${ai.freeAI.inUse ? `오늘 <b>${ai.freeAI.remaining}회</b> 남았습니다.` : '지금은 내 키를 쓰고 있어 제한이 없습니다.'}</div>` : ''}
     <p class="muted">내 API 키를 넣으면 그 AI 로 답을 받습니다. 키는 암호화해서 보관하고, 나만 쓸 수 있으며 다른 사용자에게는 보이지 않습니다.
       공유 스레드에서도 질문한 사람 본인의 키로 답합니다.</p>
     ${ai.providers.map((p) => `

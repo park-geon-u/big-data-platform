@@ -16,10 +16,11 @@ const MAX_UPLOAD = 50 * 1024 * 1024;
 
 function createApp({
   dbFile, uploadDir, dataDir, generateReply = ai.generateReply, listModels = ai.listModels, generateDocument = ai.generateDocument,
+  freeAI = {},
 } = {}) {
   const db = openDb(dbFile);
   const authz = makeAuthz(db);
-  const userAI = makeUserAI(db, { dataDir });
+  const userAI = makeUserAI(db, { dataDir, freeAI });
   fs.mkdirSync(uploadDir, { recursive: true });
 
   const app = express();
@@ -165,6 +166,9 @@ function createApp({
 
 
 
+  const freeLimitError = (limit) => new HttpError(429,
+    `오늘 무료 AI 사용 횟수(${limit}회)를 모두 썼습니다. 내일 다시 쓰거나, ⚙ 내 AI 설정에서 내 API 키를 등록하면 제한 없이 쓸 수 있습니다.`);
+
   // ---------- 공통 직렬화 ----------
   const fileOut = (f) => ({
     id: f.id, name: f.name, mime: f.mime, size: f.size, kind: f.kind, note: f.extract_note,
@@ -244,6 +248,10 @@ function createApp({
   app.post('/api/conversations/:id/messages', wrap(async (req, res) => {
     const { conv } = authz.conversationWrite(req.user.id, id(req.params.id));
     const content = str(req.body.content, '메시지', 20000);
+    // 질문한 사람의 키와 AI 로 답한다 (공유 스레드에서도 다른 사람의 키를 쓰지 않음).
+    // 개인 키가 없으면 무료 기본 AI 를 하루 정해진 횟수만큼 쓴다 (횟수 검사도 서버에서).
+    const me = userAI.resolve(req.user.id);
+    if (me.limitReached) throw freeLimitError(me.limit);
     db.prepare('INSERT INTO messages (conversation_id, author_id, role, content) VALUES (?,?,?,?)')
       .run(conv.id, req.user.id, 'user', content);
     if (conv.title === '새 대화' || conv.title === '새 스레드') {
@@ -261,15 +269,15 @@ function createApp({
     let reply;
     let aiLabel = null;
     try {
-      // 질문한 사람의 키와 AI 로 답한다 (공유 스레드에서도 다른 사람의 키를 쓰지 않음)
-      const me = userAI.active(req.user.id);
-      aiLabel = me.apiKey ? me.model : null;
+      aiLabel = me.apiKey ? `${me.model}${me.isFree ? ' (무료 기본)' : ''}` : null;
       reply = await generateReply(history, files, {
         multiUser: conv.project_id != null, provider: me.provider, model: me.model, apiKey: me.apiKey,
       });
     } catch (e) {
       console.error('AI error', e.message);
+      me.refund(); // 실패한 질문은 무료 횟수에서 빼지 않는다
       reply = `⚠️ ${e.message}`;
+      aiLabel = null;
     }
     db.prepare('INSERT INTO messages (conversation_id, author_id, role, content, ai_model) VALUES (?,?,?,?,?)')
       .run(conv.id, null, 'assistant', reply, aiLabel);
@@ -288,11 +296,13 @@ function createApp({
     const files = db.prepare(`SELECT f.* FROM conversation_files cf JOIN files f ON f.id = cf.file_id WHERE cf.conversation_id = ?`)
       .all(conv.id).filter((f) => authz.canReadFile(req.user.id, f) && authz.fileUsableInConversation(conv, f));
 
-    const me = userAI.active(req.user.id);
+    const me = userAI.resolve(req.user.id);
+    if (me.limitReached) throw freeLimitError(me.limit);
     let md;
     try {
       md = await generateDocument(history, files, instruction, { provider: me.provider, model: me.model, apiKey: me.apiKey });
     } catch (e) {
+      me.refund();
       throw new HttpError(502, `문서를 만들지 못했습니다: ${e.message}`);
     }
     const title = (str(req.body.title, '문서 이름', 100, { required: false })
@@ -316,7 +326,8 @@ function createApp({
       db.prepare('INSERT OR IGNORE INTO conversation_files (conversation_id, file_id) VALUES (?,?)').run(conv.id, fid);
       const where = conv.project_id == null ? '내 파일에' : `프로젝트 파일 저장소에${viewers.length ? ` (이 스레드 참여자 ${viewers.length}명과 공유)` : ''}`;
       db.prepare('INSERT INTO messages (conversation_id, author_id, role, content, ai_model) VALUES (?,?,?,?,?)')
-        .run(conv.id, null, 'assistant', `📝 ${req.user.name}님의 요청으로 문서 **${name}** 을(를) 만들어 ${where} 저장했습니다.`, me.apiKey ? me.model : null);
+        .run(conv.id, null, 'assistant', `📝 ${req.user.name}님의 요청으로 문서 **${name}** 을(를) 만들어 ${where} 저장했습니다.`,
+          me.apiKey ? `${me.model}${me.isFree ? ' (무료 기본)' : ''}` : null);
       db.prepare("UPDATE conversations SET updated_at = datetime('now') WHERE id = ?").run(conv.id);
       return fid;
     })();

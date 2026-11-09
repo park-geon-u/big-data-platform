@@ -113,6 +113,13 @@ function openDb(file) {
     model TEXT NOT NULL,
     PRIMARY KEY (user_id, provider)
   );
+  -- 무료 기본 AI 사용 횟수 (사용자별·날짜별)
+  CREATE TABLE IF NOT EXISTS free_ai_usage (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    day TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, day)
+  );
   -- 사용자가 지금 쓰는 AI 제공자
   CREATE TABLE IF NOT EXISTS user_ai_prefs (
     user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
