@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 업무 비서</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- 로그인 / 회원가입 -->
+  <section id="auth" class="auth hidden">
+    <div class="auth-card">
+      <h1>AI 업무 비서</h1>
+      <p class="muted">개인 AI 대화와 프로젝트 협업을 한곳에서</p>
+      <div class="tabs">
+        <button data-tab="login" class="tab active">로그인</button>
+        <button data-tab="signup" class="tab">회원가입</button>
+      </div>
+      <form id="auth-form">
+        <label class="signup-only hidden">이름<input name="name" autocomplete="name"></label>
+        <label>이메일<input name="email" type="email" required autocomplete="email"></label>
+        <label>비밀번호<input name="password" type="password" required minlength="8" autocomplete="current-password"></label>
+        <p id="auth-error" class="error"></p>
+        <button class="primary" type="submit">로그인</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- 메인 -->
+  <div id="main" class="layout hidden">
+    <aside class="sidebar" id="sidebar">
+      <div class="side-head">
+        <strong>AI 업무 비서</strong>
+        <button id="new-chat" class="primary small">+ 새 대화</button>
+      </div>
+      <nav>
+        <h3>내 AI 대화</h3>
+        <ul id="conv-list" class="list"></ul>
+        <h3>프로젝트 <button id="new-project" class="link">+ 새로 만들기</button></h3>
+        <ul id="project-list" class="list"></ul>
+      </nav>
+      <div class="side-foot">
+        <span id="me-name"></span>
+        <span><a id="settings-link" href="#/settings" class="link" style="text-decoration:none;margin-right:10px">⚙ 내 AI 설정</a><button id="logout" class="link">로그아웃</button></span>
+      </div>
+    </aside>
+    <main id="view" class="view"></main>
+  </div>
+
+  <div id="modal" class="modal hidden"><div class="modal-card" id="modal-card"></div></div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
