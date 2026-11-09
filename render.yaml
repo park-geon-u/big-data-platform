@@ -1,0 +1,20 @@
+# Render 무료 서버 배포 설정 (Blueprint)
+# 무료 서버는 잠들면 디스크가 초기화되므로, BACKUP_GITHUB_* 로 데이터를 비공개 저장소에 자동 백업·복원한다.
+services:
+  - type: web
+    name: ai-work-assistant
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: APP_SECRET
+        generateValue: true
+      - key: FREE_AI_KEY
+        sync: false
+      - key: BACKUP_GITHUB_REPO
+        sync: false
+      - key: BACKUP_GITHUB_TOKEN
+        sync: false

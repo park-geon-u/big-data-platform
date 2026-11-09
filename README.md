@@ -53,6 +53,16 @@ npm test                 # 권한·파일 읽기 테스트
 - **인터넷 어디서나 (내 컴퓨터 설치 없이)**: Railway·Render 같은 호스팅에 이 저장소를 연결해 배포하면 `https://이름.up.railway.app` 같은 주소가 생김. DB·업로드 파일이 `data/` 폴더에 저장되므로 **영구 저장 볼륨**을 `DATA_DIR` 로 연결해야 재배포 때 데이터가 지워지지 않음. 배포 시 `NODE_ENV=production` 을 설정 (HTTPS 전용 쿠키)
 - **내 도메인**: 호스팅 설정에서 구입한 도메인을 연결
 
+## 무료로 인터넷에 올리기 (Render + 깃허브 백업)
+
+Render 무료 서버는 15분 동안 접속이 없으면 잠들고, 깨어날 때 디스크가 초기화됩니다.
+그래서 데이터(DB + 업로드 파일)를 **비공개 깃허브 저장소**에 자동 백업하고, 서버가 켜질 때 복원합니다 (`src/backup.js`).
+
+- 데이터가 바뀌면 15초 안에 백업, 서버가 꺼질 때도 남은 변경을 백업
+- 환경 변수: `BACKUP_GITHUB_REPO`(예: `park-geon-u/ai-assistant-data`, 반드시 **Private**), `BACKUP_GITHUB_TOKEN`(그 저장소에만 Contents 읽기/쓰기 권한), `APP_SECRET`(사용자 AI 키 암호화용, 바꾸면 저장된 키를 못 풂)
+- `render.yaml` 이 들어 있어 Render 의 **Blueprint** 로 바로 만들 수 있음
+- 잠든 뒤 첫 접속은 30초~1분 걸림
+
 ## 구현 범위
 
 | 단계 | 내용 | 상태 |
@@ -102,6 +112,7 @@ src/
   ai.js          Claude·GPT·Gemini 호출 (키가 없으면 데모 응답)
   settings.js    사용자별 API 키 암호화 저장, 쓰는 AI·모델
   docBuilder.js  AI 가 쓴 Markdown → Word(.docx) 변환
+  backup.js      무료 서버용 데이터 백업·복원 (비공개 깃허브 저장소)
 public/          화면 (빌드 없는 순수 JS)
 test/            권한·파일 읽기 통합 테스트
 ```

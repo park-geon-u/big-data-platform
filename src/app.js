@@ -16,7 +16,7 @@ const MAX_UPLOAD = 50 * 1024 * 1024;
 
 function createApp({
   dbFile, uploadDir, dataDir, generateReply = ai.generateReply, listModels = ai.listModels, generateDocument = ai.generateDocument,
-  freeAI = {},
+  freeAI = {}, onChange,
 } = {}) {
   const db = openDb(dbFile);
   const authz = makeAuthz(db);
@@ -32,6 +32,13 @@ function createApp({
     res.set('Referrer-Policy', 'same-origin');
     next();
   });
+  // 데이터를 바꾸는 요청이 성공하면 알린다 (무료 서버용 자동 백업에 사용)
+  if (onChange) {
+    app.use('/api', (req, res, next) => {
+      if (req.method !== 'GET') res.on('finish', () => { if (res.statusCode < 400) onChange(); });
+      next();
+    });
+  }
   app.use(express.static(path.join(__dirname, '..', 'public')));
 
   // ---------- 인증 ----------
